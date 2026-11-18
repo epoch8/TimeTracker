@@ -1,8 +1,8 @@
 name: CD - Development Build
 
-# Publish :develop (and sha tags) on demand only.
-# Merges into develop no longer trigger an image publish — use workflow_dispatch
-# when you intentionally want a fresh :develop image (e.g. before a demo or RC cut).
+# Publish the fork image on demand with v<upstream>-e8.<workflow run number>.
+# The upstream version comes from VERSION; the build counter does not reset
+# when the upstream version changes. Re-runs reuse the same version tag.
 # Smoke tests must pass before push unless force_build=true.
 
 on:
@@ -16,7 +16,7 @@ on:
 
 concurrency:
   group: dev-build-${{ github.ref }}
-  # Finish in-flight publishes so :develop reaches the registry; newer runs queue.
+  # Finish in-flight publishes; newer runs queue.
   cancel-in-progress: false
 
 permissions:
@@ -26,7 +26,6 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DOCKERHUB_IMAGE: drytrix/timetracker
   PYTHON_VERSION: '3.11'
 
 jobs:
@@ -85,56 +84,29 @@ jobs:
           IMAGE_NAME_LOWER=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME_LOWER=${IMAGE_NAME_LOWER}" >> $GITHUB_OUTPUT
 
-      - name: Check Docker Hub credentials
-        id: dockerhub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Determine version
+        id: version
         run: |
-          if [ -n "$DOCKERHUB_USERNAME" ] && { [ -n "$DOCKERHUB_TOKEN" ] || [ -n "$DOCKERHUB_PASSWORD" ]; }; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "enabled=false" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          UPSTREAM_VERSION=$(cat VERSION)
+          if [[ ! "$UPSTREAM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a single upstream X.Y.Z version in VERSION"
+            exit 1
           fi
-
-      - name: Log in to Docker Hub
-        if: steps.dockerhub.outputs.enabled == 'true'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD }}
-
-      - name: Set image list for metadata
-        id: image-list
-        run: |
-          IMAGES="${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}"
-          if [ "${{ steps.dockerhub.outputs.enabled }}" = "true" ]; then
-            IMAGES="${IMAGES}"$'\n'"${{ env.DOCKERHUB_IMAGE }}"
-          fi
-          {
-            echo "images<<EOF"
-            echo "$IMAGES"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
+          VERSION="v${UPSTREAM_VERSION}-e8.${GITHUB_RUN_NUMBER}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.image-list.outputs.images }}
+          images: ${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}
+          flavor: latest=false
           tags: |
-            type=raw,value=develop
-            type=raw,value=dev-{{date 'YYYYMMDD-HHmmss'}}
-            type=sha,prefix=dev-,format=short
+            type=raw,value=${{ steps.version.outputs.version }}
           labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.description=Self-hosted time tracking web application for projects, clients, and reports.
-
-      - name: Determine version
-        id: version
-        run: |
-          VERSION="dev-${{ github.run_number }}-${GITHUB_SHA::8}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Inject donate-hide public key (optional)
         env:
@@ -148,7 +120,7 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -160,16 +132,10 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## Development image"
+            echo "## Fork image"
             echo ""
             echo "- Version: \`${{ steps.version.outputs.version }}\`"
-            echo "- Tags: \`develop\`, \`dev-<sha>\`"
-            echo "- GHCR: \`${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:develop\`"
-            if [ "${{ steps.dockerhub.outputs.enabled }}" = "true" ]; then
-              echo "- Docker Hub: \`${{ env.DOCKERHUB_IMAGE }}:develop\`"
-            else
-              echo "- Docker Hub: skipped (credentials not configured)"
-            fi
+            echo "- GHCR: \`${{ steps.image-name.outputs.IMAGE_NAME_LOWER }}:${{ steps.version.outputs.version }}\`"
             echo ""
-            echo "Publish is manual only (workflow_dispatch). Merges into \`develop\` do not build this image."
+            echo "Publish is manual only (workflow_dispatch). Select the develop branch to build the current fork."
           } >> "$GITHUB_STEP_SUMMARY"
