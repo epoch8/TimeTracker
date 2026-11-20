@@ -126,6 +126,7 @@
           <option value="">{{ _('No task') }}</option>
         </select>
       </label>
+      <button type="button" data-e8-new-task disabled class="mt-1.5 text-sm font-semibold text-primary hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">{{ _('+ New task') }}</button>
       <label class="block">
         <span class="block text-sm font-medium mb-1">{{ _('Notes') }}</span>
         <textarea name="notes" rows="3" class="form-input w-full"></textarea>
@@ -144,6 +145,9 @@
     </form>
   </div>
 </div>
+
+{# The author's "Create Task" window, the same one as in Log time and on the dashboard #}
+{% include 'components/inline_create_task_modal.html' %}
 
 <script nonce="{{ csp_nonce() }}">
 (function () {
@@ -190,6 +194,7 @@
     sel.innerHTML = '';
     sel.add(new Option(T.noTask, ''));
     sel.disabled = !projectId;
+    form.querySelector('[data-e8-new-task]').disabled = !projectId;
     if (!projectId) return;
     try {
       const data = await call('GET', `{{ url_for('e8_time.day') }}/api/projects/${projectId}/tasks`);
@@ -233,6 +238,9 @@
   function close() { dialog.classList.add('hidden'); editing = null; }
 
   form.elements.project_id.addEventListener('change', (ev) => loadTasks(ev.target.value, null));
+  form.querySelector('[data-e8-new-task]').addEventListener('click', () => {
+    if (window.ttInlineCreate) window.ttInlineCreate.open('task', { targetSelect: form.elements.task_id, projectId: form.elements.project_id.value });
+  });
   form.elements.hours.addEventListener('input', syncSubmit);
   dialog.querySelectorAll('[data-e8-close]').forEach((el) => el.addEventListener('click', close));
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && !dialog.classList.contains('hidden')) close(); });

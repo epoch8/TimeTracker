@@ -385,3 +385,10 @@ def test_day_and_week_link_to_each_other(app, authenticated_client):
     assert "/time/week?date=2026-11-18" in day
     week = authenticated_client.get("/time/week?date=2026-11-18").get_data(as_text=True)
     assert "/time?date=" in week
+
+
+def test_day_and_week_offer_new_task(app, authenticated_client):
+    for url in ("/time", "/time/week"):
+        html = authenticated_client.get(url).get_data(as_text=True)
+        assert "data-e8-new-task" in html
+        assert 'id="createTaskInlineModal"' in html
