@@ -1371,7 +1371,7 @@ def create_entry():
             return None
 
     if duration_only:
-        # e8: E8-012 hours on a day without a start time: placed after that day's last entry
+        # hours on a day without a start time: placed after that day's last entry
         try:
             entry_day = date.fromisoformat(str(entry_date_str)[:10])
         except ValueError:
@@ -1446,7 +1446,7 @@ def create_entry():
     payload["project_name"] = entry.project.name if entry.project else None
     payload["client_name"] = entry.client.name if entry.client else None
     response = {"success": True, "entry": payload}
-    # e8: E8-016 a note for the person when the day went past their norm or 12 hours
+    # A note for the person when the day went past their norm or 12 hours
     try:
         if entry.user_id == current_user.id and entry.start_time:
             from app.utils.overwork_notes import note_for_day
@@ -1633,7 +1633,8 @@ def calendar_events():
                 "start": event_start,
                 "end": event_end,
                 "allDay": ev.get("allDay", False),
-                "editable": True,
+                # Timer calendar DnD only updates time entries via /api/entry/<id>
+                "editable": False,
                 "backgroundColor": ev.get("color", "#3b82f6"),
                 "borderColor": ev.get("color", "#3b82f6"),
                 "extendedProps": {**ev, "item_type": "event"},
@@ -2182,21 +2183,38 @@ def update_entry(entry_id):
     )
 
     # Optional: start/end time and assignment updates (admin or edit_own_time_entries on own entry)
-    # Accept HTML datetime-local format: YYYY-MM-DDTHH:MM
+    # Accept datetime-local (YYYY-MM-DDTHH:MM) and FullCalendar ISO (…Z / offsets / seconds).
     def parse_dt_local(dt_str):
         if not dt_str:
             return None
         try:
-            if "T" in dt_str:
-                date_part, time_part = dt_str.split("T", 1)
-            else:
-                date_part, time_part = dt_str.split(" ", 1)
-            # Parse as UTC-aware then convert to local naive to match model storage
+            ts = str(dt_str).strip()
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            # Prefer fromisoformat so calendar drag payloads (toISOString) round-trip.
+            if "T" in ts:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is not None:
+                    return utc_to_local(dt).replace(tzinfo=None)
+                return dt
+            date_part, time_part = ts.split(" ", 1)
+            time_part = time_part[:5]  # HH:MM
             parsed_utc = parse_local_datetime(date_part, time_part)
             parsed_local_aware = utc_to_local(parsed_utc)
             return parsed_local_aware.replace(tzinfo=None)
         except Exception:
             return None
+
+    start_time_parsed = None
+    end_time_parsed = None
+    if can_edit_schedule and data.get("start_time"):
+        start_time_parsed = parse_dt_local(data.get("start_time"))
+        if start_time_parsed is None:
+            return jsonify({"error": "Invalid start_time"}), 400
+    if can_edit_schedule and data.get("end_time"):
+        end_time_parsed = parse_dt_local(data.get("end_time"))
+        if end_time_parsed is None:
+            return jsonify({"error": "Invalid end_time"}), 400
 
     # Use service layer for update to get enhanced audit logging
     service = TimeTrackingService()
@@ -2209,8 +2227,8 @@ def update_entry(entry_id):
         project_id=data.get("project_id") if can_edit_schedule else None,
         client_id=data.get("client_id") if can_edit_schedule else None,
         task_id=data.get("task_id") if can_edit_schedule else None,
-        start_time=parse_dt_local(data.get("start_time")) if can_edit_schedule and data.get("start_time") else None,
-        end_time=parse_dt_local(data.get("end_time")) if can_edit_schedule and data.get("end_time") else None,
+        start_time=start_time_parsed,
+        end_time=end_time_parsed,
         break_seconds=data.get("break_seconds") if can_edit_schedule else None,
         notes=data.get("notes"),
         tags=data.get("tags"),
@@ -2469,7 +2487,7 @@ def dashboard_stats():
     from app.models.time_entry import local_now
     from app.utils.overtime import calculate_period_overtime, get_overtime_ytd, get_week_start_for_date
 
-    # e8: E8-013 same periods as the dashboard page: whole days in the app timezone (not UTC),
+    # same periods as the dashboard page: whole days in the app timezone (not UTC),
     # each period closed at its last moment so later days are not counted in "today"
 
     today = local_now().date()

@@ -169,7 +169,7 @@ def _edit_timer_render_kwargs(timer, can_edit_schedule, show_source_dropdown):
 
 
 def _flash_overwork_note(entry, owner_id):
-    """e8: E8-016 after saving the user's own entry, a note if the day went past their norm or 12 hours."""
+    """After saving the user's own entry, a note if the day went past their norm or 12 hours."""
     try:
         if not entry or not entry.start_time or owner_id != current_user.id:
             return
@@ -1771,7 +1771,7 @@ def manual_entry():
                 end_time_parsed = start_time_parsed + timedelta(minutes=worked_minutes)
                 duration_seconds_override = worked_minutes * 60
             else:
-                # e8: E8-012 duration only: place it on the chosen day (today if none), after that
+                # duration only: place it on the chosen day (today if none), after that
                 # day's last entry, instead of ending it "now" and ignoring the date
                 from datetime import date as _date
 
@@ -2300,9 +2300,16 @@ def timer_page():
 @login_required
 def calendar_view():
     """Calendar UI combining day/week/month with list toggle."""
+    from app.utils.time_rounding import get_calendar_snap_minutes
+
     # Provide projects for quick assignment during drag-create
     active_projects = Project.query.filter_by(status="active").order_by(Project.name).all()
-    return render_template("timer/calendar.html", projects=active_projects)
+
+    return render_template(
+        "timer/calendar.html",
+        projects=active_projects,
+        calendar_snap_minutes=get_calendar_snap_minutes(current_user),
+    )
 
 
 @timer_bp.route("/timer/bulk/<int:project_id>")

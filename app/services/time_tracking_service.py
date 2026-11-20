@@ -34,7 +34,7 @@ class TimeTrackingService:
             end_time=end_time,
         )
 
-    # e8: E8-012 entries logged as hours only start here on an empty day
+    # entries logged as hours only start here on an empty day
     DURATION_ENTRY_DAY_START = time(9, 0)
 
     def place_duration_entry(self, user_id: int, day: date, duration_seconds: int) -> Dict[str, Any]:

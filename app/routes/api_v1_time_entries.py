@@ -21,7 +21,7 @@ api_v1_time_entries_bp = Blueprint("api_v1_time_entries", __name__, url_prefix="
 
 
 def _drop_dashboard_cache(user_id):
-    """e8: E8-013 the dashboard caches stats for 90 s; web routes clear it on change, API v1 did not."""
+    """the dashboard caches stats for 90 s; web routes clear it on change, API v1 did not."""
     if not user_id:
         return
     try:

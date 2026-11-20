@@ -30,7 +30,7 @@ class AnalyticsService:
         Returns:
             dict with dashboard metrics
         """
-        # e8: E8-013 periods are whole calendar days in the app timezone (stored times are naive in
+        # periods are whole calendar days in the app timezone (stored times are naive in
         # that timezone): an entry counts for the day it starts on, even if its start is later than now.
         # The old window "midnight .. now" in the server's timezone dropped entries logged for later today.
         from app.models.time_entry import local_now
