@@ -2,9 +2,9 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
-from flask import Blueprint, current_app, jsonify, make_response, request, send_from_directory, session
+from flask import Blueprint, current_app, flash, jsonify, make_response, request, send_from_directory, session
 from flask_babel import gettext as _
 from flask_login import current_user, login_required
 from flask_socketio import join_room, leave_room
@@ -1347,11 +1347,16 @@ def create_entry():
     tags = (data.get("tags") or "").strip() or None
     billable = bool(data.get("billable", True))
 
-    if not (start_time_str and end_time_str):
-        return jsonify({"error": "start_time and end_time are required"}), 400
+    entry_date_str = data.get("date")
+    duration_seconds = data.get("duration_seconds")
+    duration_only = not (start_time_str and end_time_str) and bool(entry_date_str) and duration_seconds is not None
+    if not (start_time_str and end_time_str) and not duration_only:
+        return jsonify({"error": "start_time and end_time, or date and duration_seconds, are required"}), 400
 
     if not project_id and not client_id:
         return jsonify({"error": "Either project_id or client_id is required"}), 400
+
+    entry_user_id = current_user.id if not current_user.is_admin else (data.get("user_id") or current_user.id)
 
     def parse_iso_local(s: str):
         try:
@@ -1365,15 +1370,26 @@ def create_entry():
         except Exception:
             return None
 
-    start_dt = parse_iso_local(start_time_str)
-    end_dt = parse_iso_local(end_time_str)
-    if not (start_dt and end_dt) or end_dt <= start_dt:
-        return jsonify({"error": "Invalid start/end time"}), 400
+    if duration_only:
+        # e8: E8-012 hours on a day without a start time: placed after that day's last entry
+        try:
+            entry_day = date.fromisoformat(str(entry_date_str)[:10])
+        except ValueError:
+            return jsonify({"error": "Invalid date"}), 400
+        placement = TimeTrackingService().place_duration_entry(entry_user_id, entry_day, duration_seconds)
+        if not placement.get("success"):
+            return jsonify({"error": placement.get("message", "Could not place the entry")}), 400
+        start_dt, end_dt = placement["start_time"], placement["end_time"]
+    else:
+        start_dt = parse_iso_local(start_time_str)
+        end_dt = parse_iso_local(end_time_str)
+        if not (start_dt and end_dt) or end_dt <= start_dt:
+            return jsonify({"error": "Invalid start/end time"}), 400
 
     # Use service to create entry (handles validation)
     time_tracking_service = TimeTrackingService()
     result = time_tracking_service.create_manual_entry(
-        user_id=current_user.id if not current_user.is_admin else (data.get("user_id") or current_user.id),
+        user_id=entry_user_id,
         project_id=project_id,
         client_id=client_id,
         start_time=start_dt,
@@ -1429,7 +1445,20 @@ def create_entry():
     payload = entry.to_dict()
     payload["project_name"] = entry.project.name if entry.project else None
     payload["client_name"] = entry.client.name if entry.client else None
-    return jsonify({"success": True, "entry": payload}), 201
+    response = {"success": True, "entry": payload}
+    # e8: E8-016 a note for the person when the day went past their norm or 12 hours
+    try:
+        if entry.user_id == current_user.id and entry.start_time:
+            from app.utils.overwork_notes import note_for_day
+
+            note = note_for_day(current_user, entry.start_time.date())
+            if note:
+                response["notice"] = note
+                # The dashboard reloads right after Log Time, so the note also goes out as a flash message
+                flash(note["text"], "warning" if note["level"] == "long_day" else "info")
+    except Exception:
+        current_app.logger.debug("Overwork note skipped", exc_info=True)
+    return jsonify(response), 201
 
 
 @api_bp.route("/api/entries/bulk", methods=["POST"])
@@ -2437,17 +2466,36 @@ def dashboard_stats():
     from datetime import datetime, timedelta
 
     from app.models import TimeEntry
+    from app.models.time_entry import local_now
     from app.utils.overtime import calculate_period_overtime, get_overtime_ytd, get_week_start_for_date
 
-    today = datetime.utcnow().date()
+    # e8: E8-013 same periods as the dashboard page: whole days in the app timezone (not UTC),
+    # each period closed at its last moment so later days are not counted in "today"
+
+    today = local_now().date()
     week_start = get_week_start_for_date(today, current_user)
     month_start = today.replace(day=1)
+    next_month = (month_start + timedelta(days=32)).replace(day=1)
 
-    today_hours = TimeEntry.get_total_hours_for_period(start_date=today, user_id=current_user.id)
+    def _day_start(d):
+        return datetime.combine(d, datetime.min.time())
 
-    week_hours = TimeEntry.get_total_hours_for_period(start_date=week_start, user_id=current_user.id)
+    def _period_end(d):
+        return _day_start(d) - timedelta(microseconds=1)
 
-    month_hours = TimeEntry.get_total_hours_for_period(start_date=month_start, user_id=current_user.id)
+    today_hours = TimeEntry.get_total_hours_for_period(
+        start_date=_day_start(today), end_date=_period_end(today + timedelta(days=1)), user_id=current_user.id
+    )
+
+    week_hours = TimeEntry.get_total_hours_for_period(
+        start_date=_day_start(week_start),
+        end_date=_period_end(week_start + timedelta(days=7)),
+        user_id=current_user.id,
+    )
+
+    month_hours = TimeEntry.get_total_hours_for_period(
+        start_date=_day_start(month_start), end_date=_period_end(next_month), user_id=current_user.id
+    )
 
     # Overtime for today, week, and YTD (for dashboard cards)
     today_overtime = calculate_period_overtime(current_user, today, today)

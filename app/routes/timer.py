@@ -168,6 +168,20 @@ def _edit_timer_render_kwargs(timer, can_edit_schedule, show_source_dropdown):
     }
 
 
+def _flash_overwork_note(entry, owner_id):
+    """e8: E8-016 after saving the user's own entry, a note if the day went past their norm or 12 hours."""
+    try:
+        if not entry or not entry.start_time or owner_id != current_user.id:
+            return
+        from app.utils.overwork_notes import note_for_day
+
+        note = note_for_day(current_user, entry.start_time.date())
+        if note:
+            flash(note["text"], "warning" if note["level"] == "long_day" else "info")
+    except Exception:
+        current_app.logger.debug("Overwork note skipped", exc_info=True)
+
+
 @timer_bp.route("/timer/start", methods=["POST"])
 @login_required
 def start_timer():
@@ -768,6 +782,8 @@ def stop_timer():
             current_app.logger.debug("Invalidated dashboard cache for user %s", current_user.id)
         except Exception as e:
             current_app.logger.warning("Failed to invalidate dashboard cache: %s", e)
+
+        _flash_overwork_note(active_timer, current_user.id)
 
         # Pass data for post-timer toast (message + link to time entries; no flash to avoid duplicate)
         project_name = (
@@ -1755,11 +1771,21 @@ def manual_entry():
                 end_time_parsed = start_time_parsed + timedelta(minutes=worked_minutes)
                 duration_seconds_override = worked_minutes * 60
             else:
-                # Duration-only: no start given → end=now, start=end-duration
+                # e8: E8-012 duration only: place it on the chosen day (today if none), after that
+                # day's last entry, instead of ending it "now" and ignoring the date
+                from datetime import date as _date
+
                 from app.models.time_entry import local_now as _local_now_db
 
-                end_time_parsed = _local_now_db()
-                start_time_parsed = end_time_parsed - timedelta(minutes=worked_minutes)
+                placement_day = _date.fromisoformat(start_date) if start_date else _local_now_db().date()
+                placement = TimeTrackingService().place_duration_entry(
+                    selected_user_id, placement_day, worked_minutes * 60
+                )
+                if not placement.get("success"):
+                    flash(_(placement.get("message") or "Could not place the entry"), "error")
+                    return render_template("timer/manual_entry.html", **_manual_ctx(**prefill_kwargs))
+                start_time_parsed = placement["start_time"]
+                end_time_parsed = placement["end_time"]
                 duration_seconds_override = worked_minutes * 60
         except ValueError:
             flash(_("Invalid date/time format"), "error")
@@ -1886,6 +1912,7 @@ def manual_entry():
         except Exception as e:
             current_app.logger.warning("Failed to invalidate dashboard cache: %s", e)
 
+        _flash_overwork_note(entry, target_user_id)
         return redirect(url_for("main.dashboard"))
 
     # Pre-fill start/end date with today in user's timezone (Issue #489)
