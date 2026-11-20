@@ -191,3 +191,14 @@ def test_currency_helpers(app, invoice):
     assert default_currency_for_client(invoice.client_id, settings) == "RUB"
     assert default_currencies_by_client(settings)[invoice.client_id] == "RUB"
     assert "RUB" in currency_choices(settings)
+
+
+# --- E8-009: the "Add Item" row must not be a grid itself ------------------------------------------
+
+
+def test_e8_009_added_item_row_is_not_a_grid(app, authenticated_client, invoice):
+    import re
+
+    html = authenticated_client.get(f"/invoices/{invoice.id}/edit").get_data(as_text=True)
+    outer = re.search(r"row\.className = '([^']*invoice-item-row[^']*)'", html).group(1)
+    assert "grid" not in outer.split()  # a grid here gives its two children one column of twelve each
