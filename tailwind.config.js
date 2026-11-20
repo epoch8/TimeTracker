@@ -16,6 +16,7 @@ module.exports = {
     './app/templates/**/*.html',
     './app/static/src/**/*.js',
     './app/static/idle.js',
+    './e8/**/*.html', // e8: templates of our own blueprints
   ],
   theme: {
     extend: {

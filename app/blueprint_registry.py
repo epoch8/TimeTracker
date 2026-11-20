@@ -346,6 +346,7 @@ def _register_optional_blueprints(app, logger=None):
         ("app.routes.recurring_tasks", "recurring_tasks_bp"),
         ("app.routes.team_chat", "team_chat_bp"),
         ("app.routes.client_portal_customization", "client_portal_customization_bp"),
+        ("e8.time_screen", "e8_time_bp"),  # e8: E8-011 the time screen behind Time > Track
     ]
     for module_path, attr in optional:
         try:

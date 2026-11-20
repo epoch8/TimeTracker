@@ -13,6 +13,8 @@ COPY postcss.config.js ./
 COPY scripts/copy-vendor.mjs scripts/build-js.mjs ./scripts/
 COPY app/static ./app/static
 COPY app/templates ./app/templates
+# e8: templates of our own blueprints, scanned by Tailwind
+COPY e8 ./e8
 # Create dist directory for output
 RUN mkdir -p app/static/dist
 # build:docker runs three steps:
