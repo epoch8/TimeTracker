@@ -17,7 +17,7 @@ from app.services.time_tracking_service import TimeTrackingService
 from app.utils.module_helpers import module_enabled
 from app.utils.scope_filter import get_active_projects_for_user, user_can_access_project
 from e8.time_screen import MODULE_ID, e8_time_bp
-from e8.time_screen.service import build_day, clashes, fmt_hm, parse_hours
+from e8.time_screen.service import build_day, build_week, clashes, fmt_hm, parse_hours, week_row_entries, week_start
 
 
 def _parse_day(raw) -> date:
@@ -44,8 +44,50 @@ def _own_entry(entry_id) -> TimeEntry:
     return entry
 
 
-def _after_write(day: date):
-    """Drop the dashboard cache and flash the overwork note for the day, if any."""
+def _entry_json(entry: TimeEntry) -> dict:
+    """What the week grid needs to show a saved entry: the hours as stored (after the user's rounding)."""
+    from e8.time_screen.service import entry_seconds
+
+    seconds = entry_seconds(entry)
+    return {
+        "id": entry.id,
+        "date": entry.start_time.date().isoformat(),
+        "project_id": entry.project_id,
+        "task_id": entry.task_id,
+        "notes": entry.notes or "",
+        "seconds": seconds,
+        "hours": fmt_hm(seconds),
+        "running": entry.end_time is None,
+    }
+
+
+def _row_json(row) -> dict:
+    """One week row for the grid's script: labels, and the entries of each day."""
+    return {
+        "key": row.key,
+        "project_id": row.project.id if row.project else None,
+        "task_id": row.task.id if row.task else None,
+        "project": row.project.name if row.project else None,
+        "client": (row.project.client_obj.name if row.project and row.project.client_obj else None)
+        or (row.client.name if row.client else None),
+        "task": row.task.name if row.task else None,
+        "editable": row.editable,
+        "cells": [[_entry_json(e) for e in day] for day in row.cells],
+    }
+
+
+def _description_rule():
+    """The admin setting "Require description" and its minimum length, for the grid to show."""
+    from app.models import Settings
+
+    settings = Settings.get_settings()
+    required = bool(getattr(settings, "time_entry_require_description", False))
+    return {"required": required, "min_length": int(getattr(settings, "time_entry_description_min_length", 20) or 0)}
+
+
+def _after_write(day: date, flash_note: bool = True):
+    """Drop the dashboard cache and work out the overwork note for the day. The day screen reloads after a
+    write, so there the note goes out as a flash message; the week grid does not reload and shows it itself."""
     try:
         from app.utils.cache import invalidate_dashboard_for_user
 
@@ -57,7 +99,8 @@ def _after_write(day: date):
 
         note = note_for_day(current_user, day)
         if note:
-            flash(note["text"], "warning" if note["level"] == "long_day" else "info")
+            if flash_note:
+                flash(note["text"], "warning" if note["level"] == "long_day" else "info")
             return note
     except Exception:
         current_app.logger.debug("Overwork note skipped", exc_info=True)
@@ -96,6 +139,28 @@ def day():
     )
 
 
+@e8_time_bp.route("/week")
+@login_required
+@module_enabled(MODULE_ID)
+def week():
+    view = build_week(current_user, _parse_day(request.args.get("date")))
+    week_data = {
+        "days": [d.isoformat() for d in view.days],
+        "today": view.today.isoformat(),
+        "rule": _description_rule(),
+        "rows": [_row_json(row) for row in view.rows],
+    }
+    return render_template(
+        "e8_time/week.html",
+        view=view,
+        week_data=week_data,
+        this_week=view.monday == week_start(view.today),
+        projects=_projects_for(current_user),
+        prev_week=view.monday - timedelta(days=7),
+        next_week=view.monday + timedelta(days=7),
+    )
+
+
 # --- JSON -----------------------------------------------------------------------------------------
 
 
@@ -127,6 +192,7 @@ def create_entry():
         return _error(_("This task is not in the chosen project"))
     notes = (data.get("notes") or "").strip() or None
     day = _parse_day(data.get("date"))
+    flash_note = data.get("flash", True) is not False
     service = TimeTrackingService()
 
     hours_raw = (data.get("hours") or "").strip()
@@ -142,7 +208,7 @@ def create_entry():
         )
         if not result.get("success"):
             return _error(result.get("message") or _("Could not start the timer"))
-        _after_write(day)
+        _after_write(day, flash_note)
         return jsonify({"success": True, "entry_id": result["timer"].id, "running": True}), 201
 
     seconds = parse_hours(hours_raw)
@@ -161,8 +227,9 @@ def create_entry():
     )
     if not result.get("success"):
         return _error(result.get("message") or _("Could not save the entry"))
-    note = _after_write(day)
-    return jsonify({"success": True, "entry_id": result["entry"].id, "notice": note}), 201
+    note = _after_write(day, flash_note)
+    entry = result["entry"]
+    return jsonify({"success": True, "entry_id": entry.id, "entry": _entry_json(entry), "notice": note}), 201
 
 
 @e8_time_bp.route("/api/entries/<int:entry_id>", methods=["PATCH"])
@@ -210,12 +277,13 @@ def update_entry(entry_id):
             kwargs["start_time"], kwargs["end_time"] = start, end
 
     if not kwargs:
-        return jsonify({"success": True, "entry_id": entry.id})
+        return jsonify({"success": True, "entry_id": entry.id, "entry": _entry_json(entry)})
     result = service.update_entry(entry_id=entry.id, user_id=current_user.id, **kwargs)
     if not result.get("success"):
         return _error(result.get("message") or _("Could not save the entry"))
-    note = _after_write(entry.start_time.date())
-    return jsonify({"success": True, "entry_id": entry.id, "notice": note})
+    db.session.refresh(entry)
+    note = _after_write(entry.start_time.date(), data.get("flash", True) is not False)
+    return jsonify({"success": True, "entry_id": entry.id, "entry": _entry_json(entry), "notice": note})
 
 
 @e8_time_bp.route("/api/entries/<int:entry_id>", methods=["DELETE"])
@@ -223,12 +291,15 @@ def update_entry(entry_id):
 @module_enabled(MODULE_ID)
 def delete_entry(entry_id):
     entry = _own_entry(entry_id)
+    if entry.end_time is None:
+        return _error(_("Stop the timer before deleting this entry"))
     day = entry.start_time.date()
+    deleted = _entry_json(entry)  # lets the week grid offer Undo
     result = TimeTrackingService().delete_entry(user_id=current_user.id, entry_id=entry.id)
     if not result.get("success"):
         return _error(result.get("message") or _("Could not delete the entry"))
-    _after_write(day)
-    return jsonify({"success": True})
+    _after_write(day, flash_note=False)
+    return jsonify({"success": True, "deleted": deleted})
 
 
 @e8_time_bp.route("/api/entries/<int:entry_id>/start", methods=["POST"])
@@ -268,3 +339,28 @@ def stop():
         return _error(result.get("message") or _("Could not stop the timer"))
     _after_write(day)
     return jsonify({"success": True})
+
+
+@e8_time_bp.route("/api/week/remove-row", methods=["POST"])
+@login_required
+@module_enabled(MODULE_ID)
+def remove_week_row():
+    """× at the end of a week row: delete that project and task's entries of the week (design doc 006, 3.5)."""
+    data = request.get_json(silent=True) or {}
+    project_id = data.get("project_id")
+    if not project_id:
+        return _error(_("Choose a project"))
+    monday = week_start(_parse_day(data.get("date")))
+    task_id = int(data.get("task_id") or 0) or None
+    entries = week_row_entries(current_user.id, monday, int(project_id), task_id)
+    if any(e.end_time is None for e in entries):
+        return _error(_("Stop the timer in this row first"))
+    service = TimeTrackingService()
+    deleted = 0
+    for e in entries:
+        result = service.delete_entry(user_id=current_user.id, entry_id=e.id)
+        if not result.get("success"):
+            return _error(result.get("message") or _("Could not delete the entry"))
+        deleted += 1
+    _after_write(monday, flash_note=False)
+    return jsonify({"success": True, "deleted": deleted})

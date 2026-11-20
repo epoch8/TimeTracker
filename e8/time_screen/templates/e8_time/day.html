@@ -19,6 +19,10 @@
     {% if not view.is_today %}
     <a href="{{ url_for('e8_time.day') }}" class="px-3 py-2 text-sm rounded-lg border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark hover:bg-background-light dark:hover:bg-background-dark">{{ _('Back to today') }}</a>
     {% endif %}
+    <div role="group" aria-label="{{ _('View') }}" class="ml-auto flex rounded-lg border border-border-light dark:border-border-dark overflow-hidden bg-card-light dark:bg-card-dark text-sm">
+      <a href="{{ url_for('e8_time.day', date=view.day.isoformat()) }}" aria-current="page" class="px-5 py-2.5 font-semibold bg-primary/10 text-primary">{{ _('Day') }}</a>
+      <a href="{{ url_for('e8_time.week', date=view.day.isoformat()) }}" class="px-5 py-2.5 border-l border-border-light dark:border-border-dark hover:bg-background-light dark:hover:bg-background-dark">{{ _('Week') }}</a>
+    </div>
   </div>
 
   {# Track time and the week tabs #}

@@ -152,3 +152,116 @@ def clashes(user_id: int, start: datetime, end: datetime, exclude_entry_id: Opti
         if e_end > start:
             return True
     return False
+
+
+# --- Week grid (design doc 006, 2.2 and 3.4–3.5) -----------------------------------------------------
+
+
+@dataclass
+class WeekRow:
+    """One "project / task" pair of the week. ``cells`` holds the entries of each day, Monday first."""
+
+    project: Optional[object]
+    task: Optional[object]
+    client: Optional[object] = None
+    cells: List[List[TimeEntry]] = field(default_factory=lambda: [[] for _ in range(7)])
+
+    @property
+    def key(self) -> str:
+        if self.project is None:
+            return f"client-{self.client.id if self.client else 0}"
+        return f"{self.project.id}:{self.task.id if self.task else 0}"
+
+    @property
+    def editable(self) -> bool:
+        """Rows without a project (client-only entries) are shown but not edited here."""
+        return self.project is not None
+
+    @property
+    def has_running(self) -> bool:
+        return any(e.end_time is None for day in self.cells for e in day)
+
+    @property
+    def entry_count(self) -> int:
+        return sum(len(day) for day in self.cells)
+
+
+@dataclass
+class WeekView:
+    monday: date
+    today: date
+    days: List[date]
+    rows: List[WeekRow]
+    seconds_by_entry: Dict[int, int]
+    running: Optional[TimeEntry] = None
+
+    def cell_seconds(self, row: WeekRow, i: int) -> int:
+        return sum(self.seconds_by_entry.get(e.id, 0) for e in row.cells[i])
+
+    def row_seconds(self, row: WeekRow) -> int:
+        return sum(self.cell_seconds(row, i) for i in range(7))
+
+    def day_seconds(self, i: int) -> int:
+        return sum(self.cell_seconds(row, i) for row in self.rows)
+
+    @property
+    def week_seconds(self) -> int:
+        return sum(self.day_seconds(i) for i in range(7))
+
+
+def build_week(user, day: date) -> WeekView:
+    """The week of ``day`` as a grid: one row per project and task, entries counted on the day they start."""
+    monday = week_start(day)
+    start = datetime.combine(monday, time(0, 0))
+    entries = (
+        TimeEntry.query.options(
+            joinedload(TimeEntry.project),
+            joinedload(TimeEntry.client),
+            joinedload(TimeEntry.task),
+        )
+        .filter(
+            TimeEntry.user_id == user.id,
+            TimeEntry.start_time >= start,
+            TimeEntry.start_time < start + timedelta(days=7),
+        )
+        .order_by(TimeEntry.start_time, TimeEntry.id)
+        .all()
+    )
+    rows: Dict[tuple, WeekRow] = {}
+    seconds_by_entry = {}
+    running = None
+    for e in entries:
+        key = (e.project_id or 0, e.task_id or 0, 0 if e.project_id else (e.client_id or 0))
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = WeekRow(project=e.project, task=e.task, client=None if e.project else e.client)
+        row.cells[(e.start_time.date() - monday).days].append(e)
+        seconds_by_entry[e.id] = entry_seconds(e)
+        if e.end_time is None:
+            running = e
+
+    def sort_key(row: WeekRow):
+        project = (row.project.name if row.project else (row.client.name if row.client else "")) or ""
+        return (project.lower(), ((row.task.name if row.task else "") or "").lower())
+
+    return WeekView(
+        monday=monday,
+        today=local_now().date(),
+        days=[monday + timedelta(days=i) for i in range(7)],
+        rows=sorted(rows.values(), key=sort_key),
+        seconds_by_entry=seconds_by_entry,
+        running=running,
+    )
+
+
+def week_row_entries(user_id: int, monday: date, project_id: int, task_id: Optional[int]) -> List[TimeEntry]:
+    """Entries of one "project / task" row in the week starting ``monday``."""
+    start = datetime.combine(monday, time(0, 0))
+    query = TimeEntry.query.filter(
+        TimeEntry.user_id == user_id,
+        TimeEntry.project_id == project_id,
+        TimeEntry.start_time >= start,
+        TimeEntry.start_time < start + timedelta(days=7),
+    )
+    query = query.filter(TimeEntry.task_id.is_(None) if not task_id else TimeEntry.task_id == task_id)
+    return query.all()

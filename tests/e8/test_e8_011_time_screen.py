@@ -262,3 +262,126 @@ def test_module_off_hides_the_screen_and_track_goes_to_dashboard(app, authentica
     assert authenticated_client.get("/time").status_code in (302, 403, 404)
     html = authenticated_client.get("/dashboard").get_data(as_text=True)
     assert 'href="/time"' not in html
+
+
+# --- Week grid (design doc 006, 2.2, 3.4, 3.5) -----------------------------------------------------
+
+
+def test_build_week_rows_and_cells(app, user, project, task):
+    from e8.time_screen.service import build_week
+
+    _entry(user, project, datetime(2026, 11, 16, 9, 0), 2, task=task)
+    _entry(user, project, datetime(2026, 11, 20, 9, 0), 2, task=task)
+    _entry(user, project, datetime(2026, 11, 20, 11, 0), 1, task=task)
+    _entry(user, project, datetime(2026, 11, 18, 9, 0), 3)  # same project, no task: a row of its own
+    view = build_week(user, date(2026, 11, 19))
+    assert view.monday == DAY
+    assert len(view.rows) == 2
+    with_task = next(r for r in view.rows if r.task)
+    assert [len(c) for c in with_task.cells] == [1, 0, 0, 0, 2, 0, 0]
+    assert fmt_hm(view.row_seconds(with_task)) == "5:00"
+    assert fmt_hm(view.week_seconds) == "8:00"
+
+
+def test_week_page_has_the_rows(app, authenticated_client, user, project):
+    _entry(user, project, datetime(2026, 11, 17, 9, 0), 2, notes="вторник")
+    html = authenticated_client.get("/time/week?date=2026-11-17").get_data(as_text=True)
+    import json
+
+    assert json.dumps("вторник")[1:-1] in html  # in the grid's data, as JSON
+    assert '"required": false' in html
+
+
+def test_week_page_tells_the_grid_when_a_description_is_required(app, authenticated_client):
+    from app.models import Settings
+
+    settings = Settings.get_settings()
+    settings.time_entry_require_description = True
+    settings.time_entry_description_min_length = 20
+    db.session.commit()
+    html = authenticated_client.get("/time/week").get_data(as_text=True)
+    assert '"required": true' in html
+    assert '"min_length": 20' in html
+
+
+def test_required_description_is_enforced_by_the_server(app, authenticated_client, user, project):
+    from app.models import Settings
+
+    settings = Settings.get_settings()
+    settings.time_entry_require_description = True
+    settings.time_entry_description_min_length = 20
+    db.session.commit()
+    short = authenticated_client.post(
+        "/time/api/entries", json={"project_id": project.id, "date": "2026-11-16", "hours": "1", "notes": "коротко"}
+    )
+    assert short.status_code == 400
+    ok = authenticated_client.post(
+        "/time/api/entries",
+        json={"project_id": project.id, "date": "2026-11-16", "hours": "1", "notes": "Разбор прогона eval по стране"},
+    )
+    assert ok.status_code == 201
+
+
+def test_save_returns_the_hours_as_stored(app, authenticated_client, project):
+    resp = authenticated_client.post(
+        "/time/api/entries", json={"project_id": project.id, "date": "2026-11-16", "hours": "1:30", "flash": False}
+    )
+    entry = resp.get_json()["entry"]
+    assert entry["hours"] == "1:30"
+    assert entry["date"] == "2026-11-16"
+
+
+def test_grid_saves_do_not_leave_flash_messages(app, authenticated_client, user, project):
+    _entry(user, project, datetime(2026, 11, 16, 9, 0), 8)
+    resp = authenticated_client.post(
+        "/time/api/entries", json={"project_id": project.id, "date": "2026-11-16", "hours": "1", "flash": False}
+    )
+    assert resp.get_json()["notice"]["level"] == "overtime"
+    with authenticated_client.session_transaction() as sess:
+        assert not sess.get("_flashes")
+
+
+def test_delete_returns_what_undo_needs(app, authenticated_client, user, project):
+    e = _entry(user, project, datetime(2026, 11, 16, 9, 0), 1, notes="вернуть")
+    deleted = authenticated_client.delete(f"/time/api/entries/{e.id}").get_json()["deleted"]
+    assert (deleted["date"], deleted["hours"], deleted["notes"]) == ("2026-11-16", "1:00", "вернуть")
+    again = authenticated_client.post("/time/api/entries", json={**deleted, "flash": False})
+    assert again.status_code == 201
+
+
+def test_running_timer_cannot_be_deleted_here(app, authenticated_client, user, project):
+    today = local_now().date().isoformat()
+    timer_id = authenticated_client.post(
+        "/time/api/entries", json={"project_id": project.id, "date": today}
+    ).get_json()["entry_id"]
+    assert authenticated_client.delete(f"/time/api/entries/{timer_id}").status_code == 400
+
+
+def test_remove_row_deletes_the_week_of_that_pair(app, authenticated_client, user, project, task):
+    _entry(user, project, datetime(2026, 11, 16, 9, 0), 1, task=task)
+    _entry(user, project, datetime(2026, 11, 18, 9, 0), 1, task=task)
+    _entry(user, project, datetime(2026, 11, 18, 10, 0), 1)  # no task: another row, stays
+    _entry(user, project, datetime(2026, 11, 23, 9, 0), 1, task=task)  # next week, stays
+    resp = authenticated_client.post(
+        "/time/api/week/remove-row", json={"date": "2026-11-19", "project_id": project.id, "task_id": task.id}
+    )
+    assert resp.get_json()["deleted"] == 2
+    left = TimeEntry.query.filter_by(user_id=user.id).order_by(TimeEntry.start_time).all()
+    assert [(e.start_time.day, e.task_id) for e in left] == [(18, None), (23, task.id)]
+
+
+def test_remove_row_refuses_while_its_timer_runs(app, authenticated_client, user, project):
+    today = local_now().date().isoformat()
+    authenticated_client.post("/time/api/entries", json={"project_id": project.id, "date": today})
+    resp = authenticated_client.post(
+        "/time/api/week/remove-row", json={"date": today, "project_id": project.id, "task_id": 0}
+    )
+    assert resp.status_code == 400
+    assert TimeEntry.query.filter_by(user_id=user.id, end_time=None).count() == 1
+
+
+def test_day_and_week_link_to_each_other(app, authenticated_client):
+    day = authenticated_client.get("/time?date=2026-11-18").get_data(as_text=True)
+    assert "/time/week?date=2026-11-18" in day
+    week = authenticated_client.get("/time/week?date=2026-11-18").get_data(as_text=True)
+    assert "/time?date=" in week
