@@ -53,8 +53,11 @@ TEMPLATE_VARIABLES = [
     ("seller.website", "Our website"),
     ("seller.logo", "Logo address for <img src>, empty if none"),
     ("payment_details", "Where to pay: bank details as printed"),
-    ("buyer.name", "Client name"),
-    ("buyer.tax_id", "Client tax number"),
+    ("buyer.name", "Client name (Bill to legal entity, else client)"),
+    ("buyer.tax_id", "Client tax number (VAT number, else registration number)"),
+    ("buyer.vat_number", "Client VAT number"),
+    ("buyer.registration_number", "Client registration number"),
+    ("buyer.country", "Client country code"),
     ("buyer.address", "Client address"),
     ("buyer.email", "Client e-mail"),
     ("buyer.bank_info", "Client bank details (client custom field bank_details)"),
@@ -232,16 +235,32 @@ def _seller(settings) -> SimpleNamespace:
 
 
 def _buyer(invoice) -> SimpleNamespace:
+    """Who is billed: the invoice's Bill to legal entity (its snapshot) when there is one, else the client."""
     client = getattr(invoice, "client", None)
     custom = getattr(client, "custom_fields", None) or {}
     if not isinstance(custom, dict):
         custom = {}
+    snap = getattr(invoice, "buyer_snapshot", None) or {}
+    if not isinstance(snap, dict):
+        snap = {}
+
+    def pick(*values) -> str:
+        for value in values:
+            if value:
+                return str(value).strip()
+        return ""
+
+    vat = pick(snap.get("vat_number"), getattr(client, "vat_id", None))
+    registration = pick(snap.get("registration_number"))
     return SimpleNamespace(
-        name=(getattr(invoice, "client_name", None) or getattr(client, "name", "") or "").strip(),
-        tax_id=(getattr(client, "vat_id", None) or "").strip(),
-        address=(getattr(invoice, "client_address", None) or getattr(client, "address", None) or "").strip(),
-        email=(getattr(invoice, "client_email", None) or getattr(client, "email", None) or "").strip(),
-        bank_info=str(custom.get("bank_details") or "").strip(),
+        name=pick(snap.get("legal_name"), getattr(invoice, "client_name", None), getattr(client, "name", None)),
+        tax_id=vat or registration,
+        vat_number=vat,
+        registration_number=registration,
+        country=pick(snap.get("country"), getattr(client, "country", None)),
+        address=pick(snap.get("address"), getattr(invoice, "client_address", None), getattr(client, "address", None)),
+        email=pick(snap.get("email"), getattr(invoice, "client_email", None), getattr(client, "email", None)),
+        bank_info=pick(custom.get("bank_details")),
     )
 
 

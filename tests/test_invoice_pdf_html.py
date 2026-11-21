@@ -119,6 +119,19 @@ def test_invoice_payment_text_wins_over_settings(app):
 
 
 @pytest.mark.unit
+def test_buyer_comes_from_bill_to_snapshot(app):
+    snap = {"legal_name": "Acme Europe BV", "vat_number": "NL001", "registration_number": "123", "address": "Amsterdam"}
+    with app.app_context():
+        buyer = ipdf.build_context(_invoice(buyer_snapshot=snap), _settings())["buyer"]
+    assert (buyer.name, buyer.tax_id, buyer.registration_number, buyer.address) == (
+        "Acme Europe BV",
+        "NL001",
+        "123",
+        "Amsterdam",
+    )
+
+
+@pytest.mark.unit
 def test_sandbox_blocks_python_internals(app):
     with app.app_context(), pytest.raises(ipdf.TemplateError):
         ipdf.render_html_source("{{ ''.__class__.__mro__[1].__subclasses__() }}", {})

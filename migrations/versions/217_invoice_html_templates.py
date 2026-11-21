@@ -1,15 +1,15 @@
 """HTML invoice templates: templates, their versions, the default in Settings, the frozen template on invoices.
 
-Revision ID: 215_invoice_html_templates
-Revises: 214_add_user_timezone_source
+Revision ID: 217_invoice_html_templates
+Revises: 216_add_client_entities
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import inspect
 
-revision = "215_invoice_html_templates"
-down_revision = "214_add_user_timezone_source"
+revision = "217_invoice_html_templates"
+down_revision = "216_add_client_entities"
 branch_labels = None
 depends_on = None
 
