@@ -441,18 +441,23 @@ def _weasyprint_fetcher_class():
             if rel == "logo" and self._logo_path:
                 return URLFetcherResponse(url, body=self._logo_path.read_bytes())
             if rel.startswith("fonts/"):
-                name = rel[len("fonts/") :]
-                if "/" not in name and "\\" not in name and name in available_fonts():
-                    return URLFetcherResponse(url, body=(FONTS_DIR / name).read_bytes())
+                font = font_files().get(rel[len("fonts/") :])
+                if font is not None:
+                    return URLFetcherResponse(url, body=font.read_bytes())
             raise ValueError(f"Not allowed in invoice templates: {url}")
 
     return AssetFetcher
 
 
-def available_fonts() -> List[str]:
+def font_files() -> Dict[str, Path]:
+    """Bundled font files by file name. Paths come from the folder listing, never from a request."""
     if not FONTS_DIR.is_dir():
-        return []
-    return sorted(p.name for p in FONTS_DIR.iterdir() if p.suffix.lower() in (".ttf", ".otf", ".woff", ".woff2"))
+        return {}
+    return {p.name: p for p in FONTS_DIR.iterdir() if p.suffix.lower() in (".ttf", ".otf", ".woff", ".woff2")}
+
+
+def available_fonts() -> List[str]:
+    return sorted(font_files())
 
 
 def html_to_pdf(html: str, settings=None) -> bytes:

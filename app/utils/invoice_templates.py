@@ -61,16 +61,20 @@ def parse_ref(ref: Optional[str]) -> Tuple[str, Optional[str]]:
     return VISUAL, None
 
 
-def builtin_names() -> List[str]:
+def _builtin_files() -> Dict[str, Path]:
+    """Built-in template files by name. Paths come from the folder listing, never from a request."""
     if not BUILTIN_DIR.is_dir():
-        return []
-    return sorted(p.stem for p in BUILTIN_DIR.glob("*.html"))
+        return {}
+    return {p.stem: p for p in BUILTIN_DIR.glob("*.html")}
+
+
+def builtin_names() -> List[str]:
+    return sorted(_builtin_files())
 
 
 def builtin_source(name: str) -> Optional[str]:
-    if name not in builtin_names():
-        return None
-    return (BUILTIN_DIR / f"{name}.html").read_text(encoding="utf-8")
+    path = _builtin_files().get(name)
+    return path.read_text(encoding="utf-8") if path else None
 
 
 def _html_template(template_id) -> Optional["InvoiceHtmlTemplate"]:  # noqa: F821

@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from flask import Blueprint, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
 from flask_babel import gettext as _
 from flask_login import current_user, login_required
 from markupsafe import Markup
@@ -22,12 +22,12 @@ from app import db, limiter
 from app.models import Invoice, InvoiceHtmlTemplate, Settings
 from app.utils.db import safe_commit
 from app.utils.invoice_pdf_html import (  # noqa: F401  (asset routes)
-    FONTS_DIR,
     MAX_TEMPLATE_BYTES,
     TEMPLATE_VARIABLES,
     TemplateError,
     _logo_path,
     available_fonts,
+    font_files,
     html_to_pdf,
     render_invoice_html,
     validate_template,
@@ -493,8 +493,13 @@ def preview_pdf():
     except TemplateError as exc:
         where = f" (line {exc.line})" if exc.line else ""
         return f"{exc.message}{where}", 400, {"Content-Type": "text/plain; charset=utf-8"}
-    except Exception as exc:  # WeasyPrint failure
-        return f"PDF could not be built: {exc}", 400, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception:  # WeasyPrint failure: details go to the log, not to the browser
+        current_app.logger.exception("Invoice template preview PDF failed")
+        return (
+            _("PDF could not be built. Details are in the server log."),
+            400,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
     return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=False, download_name="preview.pdf")
 
 
@@ -509,9 +514,9 @@ def asset(path):
             abort(404)
         return send_file(str(logo))
     if path.startswith("fonts/"):
-        name = path[len("fonts/") :]
-        if name in available_fonts():
-            return send_file(str(FONTS_DIR / name))
+        font = font_files().get(path[len("fonts/") :])
+        if font is not None:
+            return send_file(str(font))
     abort(404)
 
 
