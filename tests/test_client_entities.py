@@ -330,3 +330,35 @@ def test_entity_pages_off_with_module(app, admin_authenticated_client, test_clie
     _disable_module()
     resp = admin_authenticated_client.get(f"/clients/{test_client.id}/legal-entities/new")
     assert resp.status_code in (302, 403, 404)
+
+
+# --- module switched off after invoices were billed to entities ------------------------------------
+
+
+def test_module_off_keeps_sent_invoice(app, admin_authenticated_client, user, project, test_client, entity):
+    from app.utils.pdf_generator import InvoicePDFGenerator
+
+    inv = _invoice_for(project, test_client, user, entity)
+    inv.status = "sent"
+    db.session.commit()
+    _disable_module()
+    assert "ESB12345678" in InvoicePDFGenerator(inv)._generate_html()
+    assert "B12345678" in admin_authenticated_client.get(f"/invoices/{inv.id}").get_data(as_text=True)
+    db.session.refresh(inv)
+    assert inv.client_entity_id == entity.id
+
+
+def test_module_off_draft_keeps_its_entity(app, admin_authenticated_client, user, project, test_client, entity):
+    inv = _invoice_for(project, test_client, user, entity)
+    inv.status = "draft"
+    db.session.commit()
+    _disable_module()
+    entity.vat_number = "ESNEW"
+    db.session.commit()
+    html = admin_authenticated_client.get(f"/invoices/{inv.id}/edit").get_data(as_text=True)
+    assert 'name="client_entity_id"' not in html
+    assert "Bill to: Example Holding S.L." in html
+    admin_authenticated_client.post(f"/invoices/{inv.id}/edit", data=_edit_form(inv))
+    db.session.refresh(inv)
+    assert inv.client_entity_id == entity.id
+    assert inv.buyer_snapshot["vat_number"] == "ESB12345678"  # no refresh while the module is off
