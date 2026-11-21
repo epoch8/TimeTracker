@@ -43,7 +43,7 @@
         </div>
     </div>
 </div>
-<script type="application/json" id="billingEntityData">{{ {'entities': billing_entity_data, 'byClient': billing_entity_by_client, 'projectClients': billing_project_clients or {}} | tojson }}</script>
+<script type="application/json" id="billingEntityData" nonce="{{ csp_nonce() }}">{{ {'entities': billing_entity_data, 'byClient': billing_entity_by_client, 'projectClients': billing_project_clients or {}} | tojson }}</script>
 <script nonce="{{ csp_nonce() }}">
 document.addEventListener('DOMContentLoaded', function () {
     var block = document.getElementById('billingSellerBlock');
