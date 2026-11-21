@@ -315,10 +315,15 @@ class InvoicePDFGenerator:
 
         from flask import current_app
 
-        from app.utils.invoice_pdf_html import html_renderer_enabled, render_invoice_pdf
+        # HTML invoice templates (app/utils/invoice_templates.py): everything but "visual"
+        # prints from an HTML template; "visual" falls through to the layout designer below.
+        from app.utils.invoice_templates import resolve_invoice_template
 
-        if html_renderer_enabled():
-            return render_invoice_pdf(self.invoice, self.settings)
+        _resolved = resolve_invoice_template(self.invoice, self.settings)
+        if not _resolved.is_visual:
+            from app.utils.invoice_pdf_html import render_invoice_pdf
+
+            return render_invoice_pdf(_resolved.html, self.invoice, self.settings)
 
         def debug_print(msg):
             """Print debug message to stdout with immediate flush for Docker visibility"""

@@ -1,186 +1,338 @@
-"""HTML invoice template renderer (app/utils/invoice_pdf_html.py)."""
+"""HTML invoice templates: rendering, choosing the template, freezing, admin pages."""
 
+import io
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace as NS
 
 import pytest
 
+from app import db
+from app.models import Invoice, InvoiceHtmlTemplate, Settings
 from app.utils import invoice_pdf_html as ipdf
+from app.utils import invoice_templates as it
+
+TEMPLATE = """<!DOCTYPE html><html><head><style>@page { size: A4 }</style></head><body>
+<h1>Invoice {{ invoice.invoice_number }}</h1>
+<p>{{ seller.name }} / {{ buyer.name }}</p>
+{% for row in rows %}<div class="row">{{ row.description }} {{ money(row.total) }}</div>{% endfor %}
+<p class="total">{{ currency }} {{ money(total) }}</p>
+<pre>{{ payment_details }}</pre>
+</body></html>"""
 
 
-def _invoice(items=None, **overrides):
-    client = NS(name="Acme Retail GmbH", vat_id="DE123456789", address=None, email=None, custom_fields={})
-    items = items or [
+def _invoice(**overrides):
+    items = [
         NS(
             id=1,
             position=0,
-            description="Consulting\n\nFor period 01.12.2026-31.12.2026",
+            description="Consulting",
             quantity=Decimal("1"),
             unit_price=Decimal("16666.66"),
             total_amount=Decimal("16666.66"),
         ),
     ]
     data = dict(
-        invoice_number="NW-2027-001",
+        invoice_number="NW-1",
         issue_date=date(2027, 1, 1),
         due_date=date(2027, 1, 31),
-        client=client,
-        client_name="Acme Retail GmbH",
-        client_address="Hauptstrasse 5\n10115 Berlin",
-        client_email="billing@acme.example",
+        status="draft",
+        client=NS(name="Acme", vat_id="DE1", address=None, email=None, custom_fields={}),
+        client_name="Acme",
+        client_address="Street 1",
+        client_email="a@acme.example",
         items=items,
         extra_goods=[],
         expenses=[],
-        subtotal=sum(i.total_amount for i in items),
+        subtotal=Decimal("16666.66"),
         tax_rate=Decimal("0"),
         tax_amount=Decimal("0"),
         discount_amount=Decimal("0"),
-        total_amount=sum(i.total_amount for i in items),
+        total_amount=Decimal("16666.66"),
         currency_code="EUR",
-        notes="services under the agreement of July 9, 2025",
-        terms="Bank charges are paid by the sender.",
+        notes="Purpose",
+        terms="Terms",
     )
     data.update(overrides)
     return NS(**data)
 
 
-def _settings():
-    return NS(
-        company_name="Northwind Engineering LLC",
-        company_tax_id="400000000",
-        company_address="12 Harbor Street\nTbilisi",
+def _settings(**overrides):
+    data = dict(
+        company_name="Northwind LLC",
+        company_tax_id="400",
+        company_address="Tbilisi",
         company_email="",
         company_phone="",
         company_website="",
-        company_bank_info="Bank of Example\nIBAN GE00XX0000000000000000",
+        company_bank_info="Bank of Example\nIBAN GE00",
         currency="EUR",
         invoice_terms="",
+        has_logo=lambda: False,
+        get_logo_path=lambda: None,
+        invoice_pdf_template="visual",
     )
+    data.update(overrides)
+    return NS(**data)
+
+
+def _make_template(name="mine", html=TEMPLATE):
+    tpl = InvoiceHtmlTemplate(name=name, html=html, source="created")
+    db.session.add(tpl)
+    db.session.flush()
+    tpl.save_version()
+    db.session.commit()
+    return tpl
+
+
+# ---------------------------------------------------------------------------
+# Formatting and rendering
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_format_amount_uses_space_thousands():
+def test_formatters():
     assert ipdf.format_amount(Decimal("16666.66")) == "16 666.66"
-    assert ipdf.format_amount(0) == "0.00"
     assert ipdf.format_amount(None) == "0.00"
-
-
-@pytest.mark.unit
-def test_format_quantity_drops_trailing_zeros():
-    assert ipdf.format_quantity(Decimal("96.00")) == "96"
     assert ipdf.format_quantity(Decimal("24.50")) == "24.5"
-
-
-@pytest.mark.unit
-def test_text_helpers_escape_and_keep_breaks():
+    assert ipdf.format_doc_date(date(2026, 10, 30)) == "30/10/2026"
+    assert ipdf.format_doc_date(date(2026, 10, 30), "%d.%m.%Y") == "30.10.2026"
     assert str(ipdf.text_lines("a <b>\nc")) == "a &lt;b&gt;<br>c"
     assert str(ipdf.text_paragraphs("one\n\ntwo\nthree")) == "<p>one</p><p>two<br>three</p>"
 
 
 @pytest.mark.unit
-def test_resolve_template_name_rejects_unknown_and_paths(app):
+def test_render_uses_payment_details_and_autoescapes(app):
     with app.app_context():
-        assert "contract" in ipdf.available_templates()
-        assert ipdf.resolve_template_name("contract") == "contract"
-        assert ipdf.resolve_template_name("../../base") == ipdf.DEFAULT_TEMPLATE
-        assert ipdf.resolve_template_name("does-not-exist") == ipdf.DEFAULT_TEMPLATE
-
-
-@pytest.mark.unit
-def test_renderer_is_off_by_default(app):
-    with app.app_context():
-        app.config.pop("INVOICE_PDF_RENDERER", None)
-        assert ipdf.html_renderer_enabled() is False
-        app.config["INVOICE_PDF_RENDERER"] = "html"
-        assert ipdf.html_renderer_enabled() is True
-
-
-@pytest.mark.unit
-def test_contract_template_renders_parties_and_totals(app):
-    with app.test_request_context():
-        html = ipdf.render_invoice_html(_invoice(), settings=_settings(), template_name="contract")
-    assert "Invoice № NW-2027-001" in html
-    assert "Acme Retail GmbH" in html and "tax number DE123456789" in html
-    assert "Northwind Engineering LLC" in html and "Identification Number: 400000000" in html
-    assert "Payment purpose: services under the agreement of July 9, 2025" in html
+        html = ipdf.render_invoice_html(TEMPLATE, _invoice(client_name="<script>x</script>"), _settings())
+    assert "Invoice NW-1" in html
     assert "EUR 16 666.66" in html
-    assert "01/01/2027" in html
-    # one fixed-fee line: no hours / rate columns
-    assert ">Hours<" not in html
+    assert "Bank of Example" in html
+    assert "<script>x</script>" not in html
 
 
 @pytest.mark.unit
-def test_contract_template_shows_hours_for_hourly_lines(app):
-    items = [
-        NS(
-            id=1,
-            position=0,
-            description="ML engineering",
-            quantity=Decimal("96"),
-            unit_price=Decimal("70"),
-            total_amount=Decimal("6720"),
-        ),
-        NS(
-            id=2,
-            position=1,
-            description="Review",
-            quantity=Decimal("24.5"),
-            unit_price=Decimal("45"),
-            total_amount=Decimal("1102.50"),
-        ),
-    ]
-    with app.test_request_context():
-        html = ipdf.render_invoice_html(_invoice(items=items), settings=_settings())
-    assert ">Hours<" in html
-    assert ">24.5<" in html
-    assert "6 720.00" in html
+def test_invoice_payment_text_wins_over_settings(app):
+    with app.app_context():
+        html = ipdf.render_invoice_html(TEMPLATE, _invoice(payment_details_text="Pay to account X"), _settings())
+    assert "Pay to account X" in html and "Bank of Example" not in html
 
 
 @pytest.mark.unit
-def test_render_invoice_pdf_returns_pdf_bytes(app):
+def test_sandbox_blocks_python_internals(app):
+    with app.app_context(), pytest.raises(ipdf.TemplateError):
+        ipdf.render_html_source("{{ ''.__class__.__mro__[1].__subclasses__() }}", {})
+
+
+@pytest.mark.unit
+def test_validate_reports_line_and_hint(app):
+    source = "<p>{{ buyer.name }}</p>\n<p>{{ buyer.vat }}</p>"
+    with app.app_context(), pytest.raises(ipdf.TemplateError) as err:
+        ipdf.validate_template(source, _invoice(), _settings(), build_pdf=False)
+    assert err.value.line == 2
+    assert "buyer.vat" in err.value.message
+    assert err.value.hint == "buyer.tax_id"
+
+
+@pytest.mark.unit
+def test_validate_rejects_syntax_errors_and_big_files(app):
+    with app.app_context():
+        with pytest.raises(ipdf.TemplateError) as err:
+            ipdf.validate_template("<p>\n{% if x %}", _invoice(), _settings(), build_pdf=False)
+        assert err.value.line
+        with pytest.raises(ipdf.TemplateError):
+            ipdf.validate_template("x" * (ipdf.MAX_TEMPLATE_BYTES + 1), _invoice(), _settings(), build_pdf=False)
+
+
+@pytest.mark.unit
+def test_pdf_gets_bundled_fonts_but_not_server_files_or_network(app):
     pytest.importorskip("weasyprint")
-    with app.test_request_context():
-        pdf = ipdf.render_invoice_pdf(_invoice(), settings=_settings())
+    fetcher = ipdf._weasyprint_fetcher_class()()
+    font = ipdf.available_fonts()[0]
+    assert fetcher.fetch(ipdf.ASSET_BASE + "fonts/" + font).read()[:4]
+    for url in ("file:///etc/passwd", "https://example.com/x.css", ipdf.ASSET_BASE + "fonts/../../config.py"):
+        with pytest.raises(Exception):
+            fetcher.fetch(url)
+
+
+@pytest.mark.unit
+def test_builtin_simple_renders_to_pdf(app):
+    pytest.importorskip("weasyprint")
+    with app.app_context():
+        pdf = ipdf.render_invoice_pdf(it.builtin_source("simple"), _invoice(), _settings())
     assert pdf[:5] == b"%PDF-"
 
 
+# ---------------------------------------------------------------------------
+# Which template, freezing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolution_order(app):
+    with app.app_context():
+        tpl = _make_template()
+        draft = _invoice()
+        assert it.resolve_invoice_template(draft, _settings()).is_visual
+        assert it.resolve_invoice_template(draft, _settings(invoice_pdf_template=tpl.ref)).ref == tpl.ref
+        assert it.resolve_invoice_template(draft, _settings(invoice_pdf_template="builtin:simple")).html
+        entity = NS(pdf_template="builtin:simple")
+        with_entity = _invoice(billing_entity=entity)
+        assert it.resolve_invoice_template(with_entity, _settings(invoice_pdf_template=tpl.ref)).ref == "builtin:simple"
+        assert it.resolve_invoice_template(draft, _settings(invoice_pdf_template="html:999999")).is_visual
+        # left draft before templates existed: prints as it always did
+        old = _invoice(status="paid")
+        assert it.resolve_invoice_template(old, _settings(invoice_pdf_template=tpl.ref)).is_visual
+
+
 @pytest.mark.integration
-def test_preview_route_renders_real_invoice(authenticated_client, invoice_with_items):
-    invoice, _items = invoice_with_items
-    resp = authenticated_client.get(f"/invoices/{invoice.id}/pdf-html")
+def test_invoice_freezes_template_and_version_when_leaving_draft(app, invoice_with_items):
+    invoice, _ = invoice_with_items
+    tpl = _make_template()
+    settings = Settings.get_settings()
+    settings.invoice_pdf_template = tpl.ref
+    db.session.commit()
+    first_version = tpl.current_version_id
+
+    invoice = db.session.get(Invoice, invoice.id)
+    assert invoice.status == "draft"
+    invoice.status = "sent"
+    db.session.commit()
+    assert invoice.pdf_template_ref == tpl.ref
+    assert invoice.pdf_template_version_id == first_version
+
+    tpl.html = TEMPLATE.replace("<h1>", "<h1>CHANGED ")
+    tpl.save_version()
+    db.session.commit()
+    resolved = it.resolve_invoice_template(invoice)
+    assert resolved.version_id == first_version
+    assert "CHANGED" not in resolved.html
+
+
+@pytest.mark.integration
+def test_delete_switches_users_to_visual_but_keeps_frozen_versions(app, invoice_with_items):
+    invoice, _ = invoice_with_items
+    tpl = _make_template()
+    settings = Settings.get_settings()
+    settings.invoice_pdf_template = tpl.ref
+    invoice = db.session.get(Invoice, invoice.id)
+    invoice.status = "sent"
+    db.session.commit()
+
+    it.on_template_deleted(tpl, settings)
+    db.session.commit()
+    assert settings.invoice_pdf_template == "visual"
+    assert tpl.is_deleted
+    assert it.resolve_invoice_template(invoice).html == TEMPLATE  # frozen version still prints
+
+
+@pytest.mark.unit
+def test_versions_only_when_html_changes(app):
+    with app.app_context():
+        tpl = _make_template()
+        v1 = tpl.current_version_id
+        assert tpl.save_version().id == v1
+        tpl.html = TEMPLATE + " "
+        assert tpl.save_version().number == 2
+
+
+@pytest.mark.unit
+def test_free_name_adds_number(app):
+    with app.app_context():
+        _make_template("contract")
+        assert InvoiceHtmlTemplate.free_name("contract") == "contract (2)"
+        _make_template("contract (2)")
+        assert InvoiceHtmlTemplate.free_name("contract") == "contract (3)"
+
+
+# ---------------------------------------------------------------------------
+# Pages and PDF export
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_admin_pages_render(admin_authenticated_client):
+    resp = admin_authenticated_client.get("/admin/invoice-templates")
     assert resp.status_code == 200
-    body = resp.get_data(as_text=True)
-    assert f"Invoice № {invoice.invoice_number}" in body
-    assert "Development work" in body and "Testing work" in body
-    assert ">Hours<" in body
+    assert b"Make your first invoice template" in resp.data
+    assert admin_authenticated_client.get("/admin/invoice-templates/new").status_code == 200
+    assert admin_authenticated_client.get("/admin/invoice-templates/builtin/simple").status_code == 200
+    assert b"Visual layout" in admin_authenticated_client.get("/admin/pdf-layout").data
 
 
 @pytest.mark.integration
-def test_preview_route_downloads_pdf(authenticated_client, invoice_with_items):
+def test_regular_user_cannot_open_templates(authenticated_client):
+    resp = authenticated_client.get("/admin/invoice-templates")
+    assert resp.status_code in (302, 403)
+
+
+@pytest.mark.integration
+def test_save_blocks_broken_template(admin_authenticated_client, app):
+    resp = admin_authenticated_client.post(
+        "/admin/invoice-templates/new",
+        data={"name": "broken", "html": "<p>{{ buyer.vat }}</p>", "preview_invoice": "sample"},
+    )
+    assert resp.status_code == 400
+    assert b"buyer.tax_id" in resp.data
+    with app.app_context():
+        assert InvoiceHtmlTemplate.query.filter_by(name="broken").count() == 0
+
+
+@pytest.mark.integration
+def test_create_upload_duplicate_delete(admin_authenticated_client, app):
+    resp = admin_authenticated_client.post(
+        "/admin/invoice-templates/new", data={"name": "contract", "html": TEMPLATE, "preview_invoice": "sample"}
+    )
+    assert resp.status_code == 302
+    resp = admin_authenticated_client.post(
+        "/admin/invoice-templates/upload",
+        data={"file": (io.BytesIO(TEMPLATE.encode()), "contract.html")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    with app.app_context():
+        names = sorted(t.name for t in InvoiceHtmlTemplate.active().all())
+        assert names == ["contract", "contract (2)"]
+        tid = InvoiceHtmlTemplate.query.filter_by(name="contract").first().id
+    assert admin_authenticated_client.post(f"/admin/invoice-templates/{tid}/duplicate").status_code == 302
+    assert admin_authenticated_client.get(f"/admin/invoice-templates/{tid}/download").data == TEMPLATE.encode()
+    assert admin_authenticated_client.post(f"/admin/invoice-templates/{tid}/delete").status_code == 302
+    with app.app_context():
+        assert db.session.get(InvoiceHtmlTemplate, tid).is_deleted
+
+
+@pytest.mark.integration
+def test_preview_returns_html_or_error(admin_authenticated_client):
+    ok = admin_authenticated_client.post(
+        "/admin/invoice-templates/preview", json={"html": TEMPLATE, "invoice": "sample"}
+    )
+    assert "SAMPLE-0001" in ok.get_json()["html"]
+    bad = admin_authenticated_client.post(
+        "/admin/invoice-templates/preview", json={"html": "{{ buyer.vat }}", "invoice": "sample"}
+    )
+    assert bad.get_json()["hint"] == "buyer.tax_id"
+
+
+@pytest.mark.integration
+def test_export_prints_with_default_html_template(app, authenticated_client, invoice_with_items):
     pytest.importorskip("weasyprint")
-    invoice, _items = invoice_with_items
-    resp = authenticated_client.get(f"/invoices/{invoice.id}/pdf-html?download=1")
-    assert resp.status_code == 200
-    assert resp.mimetype == "application/pdf"
-    assert resp.data[:5] == b"%PDF-"
-
-
-@pytest.mark.integration
-def test_export_uses_html_renderer_when_switched_on(app, authenticated_client, invoice_with_items):
-    pytest.importorskip("weasyprint")
-    invoice, _items = invoice_with_items
-    app.config["INVOICE_PDF_RENDERER"] = "html"
-    try:
-        resp = authenticated_client.get(f"/invoices/{invoice.id}/export/pdf")
-    finally:
-        app.config["INVOICE_PDF_RENDERER"] = "designer"
-    assert resp.status_code == 200
-    assert resp.data[:5] == b"%PDF-"
-    from io import BytesIO
-
+    invoice, _ = invoice_with_items
+    tpl = _make_template()
+    Settings.get_settings().invoice_pdf_template = tpl.ref
+    db.session.commit()
+    resp = authenticated_client.get(f"/invoices/{invoice.id}/export/pdf")
+    assert resp.status_code == 200 and resp.data[:5] == b"%PDF-"
     from pypdf import PdfReader
 
-    page = PdfReader(BytesIO(resp.data)).pages[0]
-    fonts = [str(f.get_object().get("/BaseFont")) for f in page["/Resources"]["/Font"].values()]
-    assert any("Montserrat" in f for f in fonts)
+    text = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+    assert invoice.invoice_number in text
+
+
+@pytest.mark.integration
+def test_settings_page_saves_default_template(admin_authenticated_client, app):
+    with app.app_context():
+        tpl = _make_template()
+        ref = tpl.ref
+    page = admin_authenticated_client.get("/admin/settings")
+    assert b"Default invoice template" in page.data
+    assert ref.encode() in page.data

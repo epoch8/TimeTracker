@@ -26,12 +26,6 @@ class Config:
     FLASK_ENV = os.getenv("FLASK_ENV", "production")
     FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 
-    # Invoice PDF renderer: "designer" (stock layout editor, ReportLab) or "html"
-    # (Jinja template in app/templates/invoices/pdf_html/, rendered by WeasyPrint).
-    INVOICE_PDF_RENDERER = os.getenv("INVOICE_PDF_RENDERER", "designer")
-    INVOICE_PDF_HTML_TEMPLATE = os.getenv("INVOICE_PDF_HTML_TEMPLATE", "contract")
-    INVOICE_PDF_HTML_DATE_FORMAT = os.getenv("INVOICE_PDF_HTML_DATE_FORMAT", "%d/%m/%Y")
-
     # Secure cookies by default unless running in development/debug.
     _env_lower = (FLASK_ENV or "").strip().lower()
     _is_dev_like = _env_lower in ("development", "dev") or FLASK_DEBUG

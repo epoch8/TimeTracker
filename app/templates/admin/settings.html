@@ -453,6 +453,29 @@
                         <input type="number" name="invoice_start_number" id="invoice_start_number" value="{{ settings.invoice_start_number }}" class="form-input">
                     </div>
                     <div class="md:col-span-2">
+                        <label for="invoice_pdf_template" class="form-label">{{ _('Default invoice template') }}</label>
+                        <select name="invoice_pdf_template" id="invoice_pdf_template" class="form-input">
+                            {% for ref, label in invoice_template_choices() %}
+                            <option value="{{ ref }}" {% if ref == (settings.invoice_pdf_template or 'visual') %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <p class="mt-1 text-xs text-text-muted-light dark:text-text-muted-dark">
+                            {{ _('All invoices print with it, except legal entities that picked their own.') }}
+                            <a href="{{ url_for('invoice_templates.list_templates') }}" class="text-primary hover:underline">{{ _('Manage templates') }}</a>
+                        </p>
+                        {% set own = invoice_templates_entities_with_own() %}
+                        {% if own %}
+                        <div class="mt-3 text-sm">
+                            <div class="form-label">{{ _('Legal entities with their own template') }}</div>
+                            <ul class="divide-y divide-border-light dark:divide-border-dark border border-border-light dark:border-border-dark rounded-lg">
+                                {% for entity, ref in own %}
+                                <li class="flex justify-between gap-3 px-3 py-2"><span>{{ entity.short_name }}</span><span class="text-text-muted-light dark:text-text-muted-dark">{{ invoice_template_label(ref) }}</span></li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
+                    </div>
+                    <div class="md:col-span-2">
                         <label for="invoice_terms" class="form-label">Default Payment Terms</label>
                         <textarea name="invoice_terms" id="invoice_terms" rows="3" class="form-input">{{ settings.invoice_terms }}</textarea>
                     </div>

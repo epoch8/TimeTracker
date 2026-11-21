@@ -1657,34 +1657,6 @@ def export_invoice_fatturapa(invoice_id):
         return redirect(url_for("invoices.view_invoice", invoice_id=invoice_id))
 
 
-@invoices_bp.route("/invoices/<int:invoice_id>/pdf-html")
-@login_required
-def invoice_pdf_html(invoice_id):
-    """Invoice through the HTML template: browser preview, or ?download=1 for the PDF.
-
-    Works whatever INVOICE_PDF_RENDERER says, so a template can be checked before switching.
-    ?template=<name> picks a template from app/templates/invoices/pdf_html/.
-    """
-    from app.utils.invoice_pdf_html import render_invoice_html, render_invoice_pdf
-
-    invoice = Invoice.query.get_or_404(invoice_id)
-    if not current_user.is_admin and invoice.created_by != current_user.id:
-        flash(_("You do not have permission to export this invoice"), "error")
-        return redirect(url_for("invoices.list_invoices"))
-
-    template_name = request.args.get("template")
-    download = request.args.get("download")
-    if download:
-        pdf_bytes = render_invoice_pdf(invoice, template_name=template_name)
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=download != "inline",
-            download_name=f"invoice_{invoice.invoice_number}.pdf",
-        )
-    return render_invoice_html(invoice, template_name=template_name)
-
-
 @invoices_bp.route("/invoices/<int:invoice_id>/export/pdf")
 @login_required
 def export_invoice_pdf(invoice_id):
