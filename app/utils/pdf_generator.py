@@ -315,6 +315,11 @@ class InvoicePDFGenerator:
 
         from flask import current_app
 
+        from app.utils.invoice_pdf_html import html_renderer_enabled, render_invoice_pdf
+
+        if html_renderer_enabled():
+            return render_invoice_pdf(self.invoice, self.settings)
+
         def debug_print(msg):
             """Print debug message to stdout with immediate flush for Docker visibility"""
             print(msg, file=sys.stdout, flush=True)
