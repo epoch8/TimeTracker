@@ -403,6 +403,19 @@ class ModuleRegistry:
 
         cls.register(
             ModuleDefinition(
+                id="workday",
+                name="Workday",
+                description="Attendance clock-in/out and working time tracking",
+                category=ModuleCategory.TIME_TRACKING,
+                blueprint_name="workday",
+                default_enabled=True,
+                icon="fa-briefcase",
+                order=15,
+            )
+        )
+
+        cls.register(
+            ModuleDefinition(
                 id="issues",
                 name="Issues",
                 description="Issue and bug tracking",
@@ -410,6 +423,20 @@ class ModuleRegistry:
                 blueprint_name="issues",
                 default_enabled=True,
                 icon="fa-bug",
+                order=16,
+            )
+        )
+
+        cls.register(
+            ModuleDefinition(
+                id="timesheet",
+                name="Timesheet",
+                description="Day view and week grid of your own hours: Track time, Start and Stop on a row",
+                category=ModuleCategory.TIME_TRACKING,
+                blueprint_name="timesheet",
+                default_enabled=True,
+                dependencies=["timer"],
+                icon="fa-table",
                 order=15,
             )
         )
@@ -437,7 +464,7 @@ class ModuleRegistry:
                 blueprint_name="time_entry_templates",
                 default_enabled=True,
                 icon="fa-clipboard-list",
-                order=16,
+                order=17,
             )
         )
 
@@ -875,6 +902,7 @@ class ModuleRegistry:
         "activity_feed",
         "team_chat",
         "time_approvals",
+        "workday",
         "project_templates",
         "recurring_tasks",
         "recurring_invoices",
