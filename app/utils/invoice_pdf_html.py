@@ -279,7 +279,11 @@ def build_context(invoice, settings=None) -> Dict[str, Any]:
         total = sum((r.total for r in rows), Decimal("0"))
 
     terms = getattr(invoice, "terms", None) or getattr(settings, "invoice_terms", None) or ""
-    payment_details = getattr(invoice, "payment_details_text", None) or getattr(settings, "company_bank_info", "")
+    payment_details = (
+        getattr(invoice, "payment_details_text", None)
+        or getattr(settings, "payment_text", None)  # legal-entity seller: the raw Pay to text
+        or getattr(settings, "company_bank_info", "")
+    )
 
     return {
         "invoice": invoice,

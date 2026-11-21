@@ -317,9 +317,11 @@ class InvoicePDFGenerator:
 
         # HTML invoice templates (app/utils/invoice_templates.py): everything but "visual"
         # prints from an HTML template; "visual" falls through to the layout designer below.
-        from app.utils.invoice_templates import resolve_invoice_template
+        from app.utils.invoice_templates import load_ref, resolve_invoice_template
 
-        _resolved = resolve_invoice_template(self.invoice, self.settings)
+        # template_ref: set by previews to print with a given template instead of the invoice's own
+        _override = getattr(self, "template_ref", None)
+        _resolved = load_ref(_override) if _override else resolve_invoice_template(self.invoice, self.settings)
         if not _resolved.is_visual:
             from app.utils.invoice_pdf_html import render_invoice_pdf
 

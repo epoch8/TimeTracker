@@ -437,22 +437,7 @@
             <div id="section-invoices" class="border-b border-border-light dark:border-border-dark pb-6">
                 <h2 class="text-lg font-semibold mb-4">{{ _('Invoice Defaults') }}</h2>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                        <label for="invoice_prefix" class="form-label">Invoice Prefix</label>
-                        <input type="text" name="invoice_prefix" id="invoice_prefix" value="{{ settings.invoice_prefix }}" class="form-input">
-                    </div>
-                    <div class="md:col-span-2">
-                        <label for="invoice_number_pattern" class="form-label">Invoice Number Pattern</label>
-                        <input type="text" name="invoice_number_pattern" id="invoice_number_pattern" value="{{ settings.invoice_number_pattern or '{PREFIX}-{YYYY}{MM}{DD}-{SEQ}' }}" class="form-input" placeholder="e.g. RE-{YYYY}-{SEQ}">
-                        <p class="mt-1 text-xs text-text-muted-light dark:text-text-muted-dark">
-                            Available tokens: <code>{SEQ}</code>, <code>{YYYY}</code>, <code>{YY}</code>, <code>{MM}</code>, <code>{DD}</code>, <code>{PREFIX}</code>. Leave blank to generate sequence-only numbers.
-                        </p>
-                    </div>
-                    <div>
-                        <label for="invoice_start_number" class="form-label">Invoice Start Number</label>
-                        <input type="number" name="invoice_start_number" id="invoice_start_number" value="{{ settings.invoice_start_number }}" class="form-input">
-                    </div>
-                    <div class="md:col-span-2">
+                    <div id="invoice_pdf_template_field" class="md:col-span-2 scroll-mt-24 rounded-lg target:ring-2 target:ring-primary target:ring-offset-4">
                         <label for="invoice_pdf_template" class="form-label">{{ _('Default invoice template') }}</label>
                         <select name="invoice_pdf_template" id="invoice_pdf_template" class="form-input">
                             {% for ref, label in invoice_template_choices() %}
@@ -474,6 +459,21 @@
                             </ul>
                         </div>
                         {% endif %}
+                    </div>
+                    <div>
+                        <label for="invoice_prefix" class="form-label">Invoice Prefix</label>
+                        <input type="text" name="invoice_prefix" id="invoice_prefix" value="{{ settings.invoice_prefix }}" class="form-input">
+                    </div>
+                    <div class="md:col-span-2">
+                        <label for="invoice_number_pattern" class="form-label">Invoice Number Pattern</label>
+                        <input type="text" name="invoice_number_pattern" id="invoice_number_pattern" value="{{ settings.invoice_number_pattern or '{PREFIX}-{YYYY}{MM}{DD}-{SEQ}' }}" class="form-input" placeholder="e.g. RE-{YYYY}-{SEQ}">
+                        <p class="mt-1 text-xs text-text-muted-light dark:text-text-muted-dark">
+                            Available tokens: <code>{SEQ}</code>, <code>{YYYY}</code>, <code>{YY}</code>, <code>{MM}</code>, <code>{DD}</code>, <code>{PREFIX}</code>. Leave blank to generate sequence-only numbers.
+                        </p>
+                    </div>
+                    <div>
+                        <label for="invoice_start_number" class="form-label">Invoice Start Number</label>
+                        <input type="number" name="invoice_start_number" id="invoice_start_number" value="{{ settings.invoice_start_number }}" class="form-input">
                     </div>
                     <div class="md:col-span-2">
                         <label for="invoice_terms" class="form-label">Default Payment Terms</label>

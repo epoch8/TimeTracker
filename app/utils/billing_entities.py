@@ -202,6 +202,7 @@ class SellerSettings:
         self._settings = settings
         self._snapshot = snapshot or {}
         self._payment_text = payment_text or ""
+        self.payment_text = self._payment_text  # as typed, for HTML templates (company_bank_info is escaped)
         self._iban = iban or ""
 
     def __getattr__(self, name):

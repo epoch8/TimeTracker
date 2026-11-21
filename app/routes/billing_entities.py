@@ -307,37 +307,53 @@ def delete_account(entity_id, account_id):
 @module_enabled("billing_entities")
 @admin_or_permission_required("manage_settings")
 def preview_pdf(entity_id):
-    """A trial invoice from this entity with its invoice template: its latest invoice, else a sample."""
+    """A trial invoice from this entity, printed with the template chosen in the form.
+
+    ``?template=`` is the value of the template select, saved or not: ``default`` for the
+    default from Settings, else a template reference. Without it, the entity's saved choice. The invoice is the entity's
+    latest one; without one, the latest invoice with no legal entity printed with this
+    entity's details; for HTML templates without any invoice, a sample.
+    """
     import io
 
     from flask import send_file
 
     from app.models import Invoice, Settings
-    from app.utils.billing_entities import SellerSettings, seller_settings_for
+    from app.utils.billing_entities import SellerSettings
     from app.utils.invoice_pdf_html import TemplateError, render_invoice_pdf
-    from app.utils.invoice_templates import load_ref
+    from app.utils.invoice_templates import default_template_ref, load_ref, ref_exists
+    from app.utils.pdf_generator import InvoicePDFGenerator
 
     entity = BillingEntity.query.get_or_404(entity_id)
     settings = Settings.get_settings()
-    resolved = load_ref(entity.pdf_template or getattr(settings, "invoice_pdf_template", None))
-    if resolved.is_visual:
-        flash(_("This entity prints with the Visual layout. Preview it on the Visual layout tab."), "info")
-        return redirect(url_for("admin.pdf_layout"))
+    # no ?template (a bookmarked link): what the entity has saved
+    wanted = (request.args.get("template") or entity.pdf_template or "default").strip()
+    if wanted == "default" or not ref_exists(wanted):
+        wanted = default_template_ref(settings)
+    resolved = load_ref(wanted)
 
+    account = next((a for a in entity.payment_accounts if a.is_active), None)
+    entity_seller = SellerSettings(
+        settings, entity.seller_snapshot(), account.printed_text if account else "", account.iban if account else ""
+    )
     invoice = Invoice.query.filter_by(billing_entity_id=entity.id).order_by(Invoice.id.desc()).first()
-    if invoice is not None:
-        seller = seller_settings_for(invoice, settings)
-    else:
-        from app.routes.invoice_templates import sample_invoice
+    if invoice is None:
+        invoice = Invoice.query.filter(Invoice.billing_entity_id.is_(None)).order_by(Invoice.id.desc()).first()
 
-        invoice = sample_invoice()
-        account = next((a for a in entity.payment_accounts if a.is_active), None)
-        invoice.payment_details_text = account.printed_text if account else ""
-        seller = SellerSettings(
-            settings, entity.seller_snapshot(), invoice.payment_details_text, account.iban if account else ""
-        )
     try:
-        pdf = render_invoice_pdf(resolved.html, invoice, seller)
+        if invoice is not None:
+            generator = InvoicePDFGenerator(invoice, settings=entity_seller)
+            generator.template_ref = resolved.ref
+            pdf = generator.generate_pdf()
+        elif resolved.is_visual:
+            flash(_("Create an invoice first: the Visual layout is previewed on a real invoice."), "info")
+            return redirect(url_for("billing_entities.index", entity_id=entity.id))
+        else:
+            from app.routes.invoice_templates import sample_invoice
+
+            sample = sample_invoice()
+            sample.payment_details_text = account.printed_text if account else ""
+            pdf = render_invoice_pdf(resolved.html, sample, entity_seller)
     except TemplateError as exc:
         flash(_("The template could not be printed: %(err)s", err=exc.message), "error")
         return redirect(url_for("billing_entities.index", entity_id=entity.id))

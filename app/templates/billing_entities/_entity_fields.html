@@ -78,13 +78,30 @@
                     </optgroup>
                 </select>
                 {% if entity and entity.id %}
-                <a href="{{ url_for('billing_entities.preview_pdf', entity_id=entity.id) }}" target="_blank" rel="noopener" class="btn btn-secondary min-h-[44px]"><i class="far fa-file-pdf mr-2" aria-hidden="true"></i>{{ _('Preview invoice PDF') }}</a>
+                <a id="pdf_template_preview" href="{{ url_for('billing_entities.preview_pdf', entity_id=entity.id) }}" data-base="{{ url_for('billing_entities.preview_pdf', entity_id=entity.id) }}" target="_blank" rel="noopener" class="btn btn-secondary min-h-[44px]"><i class="far fa-file-pdf mr-2" aria-hidden="true"></i>{{ _('Preview invoice PDF') }}</a>
                 {% endif %}
             </div>
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">
-                {{ _('Follows the default for all entities. Pick a template only if this entity needs its own.') }}
-                <a href="{{ url_for('admin.settings') }}#section-invoices" class="text-primary hover:underline">{{ _('Change default') }}</a>
+                <span id="pdf_template_hint_default" {% if entity and entity.pdf_template %}hidden{% endif %}>{{ _('Follows the default for all entities. Pick a template only if this entity needs its own.') }}</span>
+                <span id="pdf_template_hint_own" {% if not (entity and entity.pdf_template) %}hidden{% endif %}>{{ _('This entity prints with its own template. Pick Default to follow the one for all entities.') }}</span>
+                <a href="{{ url_for('admin.settings') }}#invoice_pdf_template_field" class="text-primary hover:underline">{{ _('Change default') }}</a>
             </p>
+            <script nonce="{{ csp_nonce() }}">
+            (function () {
+                var select = document.getElementById('pdf_template');
+                var link = document.getElementById('pdf_template_preview');
+                var hintDefault = document.getElementById('pdf_template_hint_default');
+                var hintOwn = document.getElementById('pdf_template_hint_own');
+                if (!select) return;
+                function sync() {
+                    if (link) link.href = link.dataset.base + '?template=' + encodeURIComponent(select.value || 'default');
+                    hintDefault.hidden = !!select.value;
+                    hintOwn.hidden = !select.value;
+                }
+                select.addEventListener('change', sync);
+                sync();
+            })();
+            </script>
         </div>
         <div class="md:col-span-6">
             <label for="number_format" class="form-label">{{ _('Number format') }}</label>

@@ -477,7 +477,27 @@ def test_entity_preview_pdf(admin_authenticated_client, app, billing_entity):
     text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(resp.data)).pages)
     assert "EPOCH8 LLC" in text and "GE31CD0360000045459829" in text
 
-    billing_entity.pdf_template = "visual"
+    # no invoices at all: the Visual layout cannot be previewed on a sample
+    resp = admin_authenticated_client.get(f"/admin/legal-entities/{billing_entity.id}/preview-pdf?template=visual")
+    assert resp.status_code == 302
+
+
+@pytest.mark.integration
+def test_entity_preview_uses_the_template_in_the_select(
+    admin_authenticated_client, app, billing_entity, invoice_with_items
+):
+    pytest.importorskip("weasyprint")
+    from pypdf import PdfReader
+
+    own = _make_template("own", TEMPLATE.replace("<h1>", "<h1>UNSAVED CHOICE "))
+    billing_entity.pdf_template = None  # saved: default (visual)
     db.session.commit()
-    resp = admin_authenticated_client.get(f"/admin/legal-entities/{billing_entity.id}/preview-pdf")
-    assert resp.status_code == 302 and "/admin/pdf-layout" in resp.headers["Location"]
+    url = f"/admin/legal-entities/{billing_entity.id}/preview-pdf"
+
+    resp = admin_authenticated_client.get(f"{url}?template={own.ref}")
+    text = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+    assert "UNSAVED CHOICE" in text and "EPOCH8 LLC" in text and "GE31CD0360000045459829" in text
+
+    visual = admin_authenticated_client.get(f"{url}?template=visual")
+    assert visual.status_code == 200 and visual.data[:5] == b"%PDF-"
+    assert "UNSAVED CHOICE" not in PdfReader(io.BytesIO(visual.data)).pages[0].extract_text()
