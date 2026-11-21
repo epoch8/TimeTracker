@@ -1,4 +1,5 @@
-"""HTML invoice templates: templates, their versions, the default in Settings, the frozen template on invoices.
+"""HTML invoice templates: templates, versions, the default in Settings, the frozen template on invoices,
+and a template and logo on legal entities.
 
 Revision ID: 217_invoice_html_templates
 Revises: 216_add_client_entities
@@ -85,6 +86,12 @@ def upgrade():
             sa.Column("invoice_pdf_template", sa.String(length=64), nullable=False, server_default="visual"),
         )
 
+    if _has_table(inspector, "billing_entities"):
+        if not _has_column(inspector, "billing_entities", "pdf_template"):
+            op.add_column("billing_entities", sa.Column("pdf_template", sa.String(length=64), nullable=True))
+        if not _has_column(inspector, "billing_entities", "logo_filename"):
+            op.add_column("billing_entities", sa.Column("logo_filename", sa.String(length=255), nullable=True))
+
     if not _has_column(inspector, "invoices", "pdf_template_ref"):
         op.add_column("invoices", sa.Column("pdf_template_ref", sa.String(length=64), nullable=True))
     if not _has_column(inspector, "invoices", "pdf_template_version_id"):
@@ -110,6 +117,10 @@ def downgrade():
     if _has_column(inspector, "invoices", "pdf_template_ref"):
         with op.batch_alter_table("invoices") as batch:
             batch.drop_column("pdf_template_ref")
+    for column in ("logo_filename", "pdf_template"):
+        if _has_column(inspector, "billing_entities", column):
+            with op.batch_alter_table("billing_entities") as batch:
+                batch.drop_column(column)
     if _has_column(inspector, "settings", "invoice_pdf_template"):
         with op.batch_alter_table("settings") as batch:
             batch.drop_column("invoice_pdf_template")

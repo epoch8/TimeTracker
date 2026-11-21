@@ -36,6 +36,7 @@ from app.utils.invoice_templates import (
     BUILTIN_DESCRIPTIONS,
     builtin_names,
     builtin_source,
+    default_template_ref,
     entities_with_own_template,
     on_template_deleted,
     ref_label,
@@ -519,11 +520,17 @@ def asset(path):
 # ---------------------------------------------------------------------------
 
 
-@invoice_templates_bp.app_context_processor
+@invoice_templates_bp.record_once
+def _register_template_helpers(state):
+    """Jinja globals (not a context processor) so they also work inside imported macros."""
+    state.app.jinja_env.globals.update(_template_helpers())
+
+
 def _template_helpers():
     return {
         "invoice_template_choices": template_choices,
         "invoice_template_label": ref_label,
         "invoice_templates_entities_with_own": entities_with_own_template,
         "invoice_uses_visual_layout": uses_visual_layout,
+        "settings_default_invoice_template": default_template_ref,
     }

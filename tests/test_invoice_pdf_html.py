@@ -349,3 +349,135 @@ def test_settings_page_saves_default_template(admin_authenticated_client, app):
     page = admin_authenticated_client.get("/admin/settings")
     assert b"Default invoice template" in page.data
     assert ref.encode() in page.data
+
+
+# ---------------------------------------------------------------------------
+# Legal entities: own template, logo, preview
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes():
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20), (79, 70, 229)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def billing_entity(app):
+    from app.models import BillingEntity, PaymentAccount
+
+    entity = BillingEntity(short_name="EPOCH8", legal_name="EPOCH8 LLC", registration_number="405715043")
+    db.session.add(entity)
+    db.session.flush()
+    db.session.add(
+        PaymentAccount(
+            billing_entity_id=entity.id,
+            currency="EUR",
+            iban="GE31CD0360000045459829",
+            details_text="JSC CREDO BANK\nAccount: {IBAN}",
+        )
+    )
+    db.session.commit()
+    return entity
+
+
+@pytest.mark.integration
+def test_entity_form_saves_template_and_logo(admin_authenticated_client, app, billing_entity):
+    tpl = _make_template("contract")
+    resp = admin_authenticated_client.post(
+        f"/admin/legal-entities/{billing_entity.id}",
+        data={"short_name": "EPOCH8", "pdf_template": tpl.ref, "logo": (io.BytesIO(_png_bytes()), "logo.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    entity = db.session.get(type(billing_entity), billing_entity.id)
+    assert entity.pdf_template == tpl.ref
+    assert entity.logo_filename and entity.logo_filename.startswith("entity_logo_")
+    assert entity.seller_snapshot()["logo_filename"] == entity.logo_filename
+    logo_file = type(entity).logo_path(entity.logo_filename)
+    try:
+        assert logo_file
+        from app.utils.billing_entities import SellerSettings
+
+        seller = SellerSettings(Settings.get_settings(), entity.seller_snapshot(), "", "")
+        assert seller.has_logo() and seller.get_logo_path() == logo_file
+        assert ipdf.build_context(_invoice(), seller)["seller"].logo == "logo"
+    finally:
+        import os
+
+        if logo_file and os.path.exists(logo_file):
+            os.remove(logo_file)
+
+    page = admin_authenticated_client.get(f"/admin/legal-entities/{entity.id}")
+    assert b"Invoice template" in page.data and b"Default (Visual layout)" in page.data
+
+    # unknown template and "Default" both store nothing
+    admin_authenticated_client.post(
+        f"/admin/legal-entities/{entity.id}", data={"short_name": "EPOCH8", "pdf_template": "html:999999"}
+    )
+    assert db.session.get(type(entity), entity.id).pdf_template is None
+
+
+@pytest.mark.integration
+def test_entity_rejects_non_image_logo(admin_authenticated_client, app, billing_entity):
+    admin_authenticated_client.post(
+        f"/admin/legal-entities/{billing_entity.id}",
+        data={"short_name": "EPOCH8", "logo": (io.BytesIO(b"not an image"), "logo.png")},
+        content_type="multipart/form-data",
+    )
+    assert db.session.get(type(billing_entity), billing_entity.id).logo_filename is None
+
+
+@pytest.mark.integration
+def test_entity_template_wins_over_settings_and_logo_reaches_the_seller(app, billing_entity, invoice_with_items):
+    from app.utils.billing_entities import seller_settings_for
+
+    invoice, _ = invoice_with_items
+    default_tpl = _make_template("default")
+    own_tpl = _make_template("own", TEMPLATE.replace("<h1>", "<h1>OWN "))
+    Settings.get_settings().invoice_pdf_template = default_tpl.ref
+    billing_entity.pdf_template = own_tpl.ref
+    invoice = db.session.get(Invoice, invoice.id)
+    invoice.billing_entity_id = billing_entity.id
+    invoice.seller_snapshot = billing_entity.seller_snapshot()
+    db.session.commit()
+
+    assert it.resolve_invoice_template(invoice).ref == own_tpl.ref
+
+    billing_entity.pdf_template = None
+    db.session.commit()
+    assert it.resolve_invoice_template(invoice).ref == default_tpl.ref
+
+    seller = seller_settings_for(invoice, Settings.get_settings())
+    assert seller.has_logo() is False  # no logo yet
+    assert it.entities_with_own_template() == []
+
+
+@pytest.mark.integration
+def test_deleting_template_moves_entity_to_visual(app, billing_entity):
+    tpl = _make_template()
+    billing_entity.pdf_template = tpl.ref
+    db.session.commit()
+    it.on_template_deleted(tpl)
+    db.session.commit()
+    assert billing_entity.pdf_template == "visual"
+
+
+@pytest.mark.integration
+def test_entity_preview_pdf(admin_authenticated_client, app, billing_entity):
+    pytest.importorskip("weasyprint")
+    billing_entity.pdf_template = "builtin:simple"
+    db.session.commit()
+    resp = admin_authenticated_client.get(f"/admin/legal-entities/{billing_entity.id}/preview-pdf")
+    assert resp.status_code == 200 and resp.data[:5] == b"%PDF-"
+    from pypdf import PdfReader
+
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(resp.data)).pages)
+    assert "EPOCH8 LLC" in text and "GE31CD0360000045459829" in text
+
+    billing_entity.pdf_template = "visual"
+    db.session.commit()
+    resp = admin_authenticated_client.get(f"/admin/legal-entities/{billing_entity.id}/preview-pdf")
+    assert resp.status_code == 302 and "/admin/pdf-layout" in resp.headers["Location"]

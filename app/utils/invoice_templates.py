@@ -135,6 +135,11 @@ def _settings_ref(settings=None) -> str:
         return VISUAL
 
 
+def default_template_ref(settings=None) -> str:
+    """The template set in Settings for invoices whose legal entity has none."""
+    return _settings_ref(settings)
+
+
 def current_choice(invoice, settings=None) -> ResolvedTemplate:
     """Template the invoice would get now, ignoring anything frozen on it."""
     ref = _entity_ref(invoice) or _settings_ref(settings)
