@@ -61,7 +61,7 @@ def _settings(**overrides):
     data = dict(
         company_name="Northwind LLC",
         company_tax_id="400",
-        company_address="Tbilisi",
+        company_address="1 Example Street",
         company_email="",
         company_phone="",
         company_website="",
@@ -368,14 +368,14 @@ def _png_bytes():
 def billing_entity(app):
     from app.models import BillingEntity, PaymentAccount
 
-    entity = BillingEntity(short_name="EPOCH8", legal_name="EPOCH8 LLC", registration_number="405715043")
+    entity = BillingEntity(short_name="ACME", legal_name="ACME TRADING LLC", registration_number="123456789")
     db.session.add(entity)
     db.session.flush()
     db.session.add(
         PaymentAccount(
             billing_entity_id=entity.id,
             currency="EUR",
-            iban="GE31CD0360000045459829",
+            iban="DE89370400440532013000",
             details_text="JSC CREDO BANK\nAccount: {IBAN}",
         )
     )
@@ -388,7 +388,7 @@ def test_entity_form_saves_template_and_logo(admin_authenticated_client, app, bi
     tpl = _make_template("contract")
     resp = admin_authenticated_client.post(
         f"/admin/legal-entities/{billing_entity.id}",
-        data={"short_name": "EPOCH8", "pdf_template": tpl.ref, "logo": (io.BytesIO(_png_bytes()), "logo.png")},
+        data={"short_name": "ACME", "pdf_template": tpl.ref, "logo": (io.BytesIO(_png_bytes()), "logo.png")},
         content_type="multipart/form-data",
     )
     assert resp.status_code == 302
@@ -415,7 +415,7 @@ def test_entity_form_saves_template_and_logo(admin_authenticated_client, app, bi
 
     # unknown template and "Default" both store nothing
     admin_authenticated_client.post(
-        f"/admin/legal-entities/{entity.id}", data={"short_name": "EPOCH8", "pdf_template": "html:999999"}
+        f"/admin/legal-entities/{entity.id}", data={"short_name": "ACME", "pdf_template": "html:999999"}
     )
     assert db.session.get(type(entity), entity.id).pdf_template is None
 
@@ -424,7 +424,7 @@ def test_entity_form_saves_template_and_logo(admin_authenticated_client, app, bi
 def test_entity_rejects_non_image_logo(admin_authenticated_client, app, billing_entity):
     admin_authenticated_client.post(
         f"/admin/legal-entities/{billing_entity.id}",
-        data={"short_name": "EPOCH8", "logo": (io.BytesIO(b"not an image"), "logo.png")},
+        data={"short_name": "ACME", "logo": (io.BytesIO(b"not an image"), "logo.png")},
         content_type="multipart/form-data",
     )
     assert db.session.get(type(billing_entity), billing_entity.id).logo_filename is None
@@ -475,7 +475,7 @@ def test_entity_preview_pdf(admin_authenticated_client, app, billing_entity):
     from pypdf import PdfReader
 
     text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(resp.data)).pages)
-    assert "EPOCH8 LLC" in text and "GE31CD0360000045459829" in text
+    assert "ACME TRADING LLC" in text and "DE89370400440532013000" in text
 
     # no invoices at all: the Visual layout cannot be previewed on a sample
     resp = admin_authenticated_client.get(f"/admin/legal-entities/{billing_entity.id}/preview-pdf?template=visual")
@@ -496,7 +496,7 @@ def test_entity_preview_uses_the_template_in_the_select(
 
     resp = admin_authenticated_client.get(f"{url}?template={own.ref}")
     text = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
-    assert "UNSAVED CHOICE" in text and "EPOCH8 LLC" in text and "GE31CD0360000045459829" in text
+    assert "UNSAVED CHOICE" in text and "ACME TRADING LLC" in text and "DE89370400440532013000" in text
 
     visual = admin_authenticated_client.get(f"{url}?template=visual")
     assert visual.status_code == 200 and visual.data[:5] == b"%PDF-"
