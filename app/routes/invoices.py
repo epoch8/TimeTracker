@@ -26,6 +26,7 @@ from flask_login import current_user, login_required
 from app import db, log_event, track_event
 from app.models import (
     Expense,
+    ExpenseCategory,
     ExtraGood,
     Invoice,
     InvoiceImage,
@@ -66,6 +67,7 @@ def list_invoices():
     from app.services import InvoiceService
 
     # Get filter parameters
+    page = request.args.get("page", 1, type=int)
     status = request.args.get("status", "").strip()
     payment_status = request.args.get("payment_status", "").strip()
     search_query = request.args.get("search", "").strip()
@@ -78,7 +80,17 @@ def list_invoices():
         search=search_query if search_query else None,
         user_id=current_user.id,
         is_admin=current_user.is_admin,
+        page=page,
     )
+
+    # Filter params for pagination links (page is added by pagination_nav)
+    pagination_url_params = {}
+    if status:
+        pagination_url_params["status"] = status
+    if payment_status:
+        pagination_url_params["payment_status"] = payment_status
+    if search_query:
+        pagination_url_params["search"] = search_query
 
     # Check if this is an AJAX request
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
@@ -87,12 +99,20 @@ def list_invoices():
             render_template(
                 "invoices/_invoices_list.html",
                 invoices=result["invoices"],
+                pagination=result["pagination"],
+                pagination_url_params=pagination_url_params,
             )
         )
         response.headers["Content-Type"] = "text/html; charset=utf-8"
         return response
 
-    return render_template("invoices/list.html", invoices=result["invoices"], summary=result["summary"])
+    return render_template(
+        "invoices/list.html",
+        invoices=result["invoices"],
+        summary=result["summary"],
+        pagination=result["pagination"],
+        pagination_url_params=pagination_url_params,
+    )
 
 
 @invoices_bp.route("/projects/<int:project_id>/invoices")
@@ -847,6 +867,7 @@ def edit_invoice(invoice_id):
                 invoice=invoice,
                 projects=Project.query.filter_by(status="active").order_by(Project.name).all(),
                 financial_locked=False,
+                expense_categories=ExpenseCategory.query.order_by(ExpenseCategory.name).all(),
             )
 
         flash(_("Invoice updated successfully"), "success")
@@ -891,6 +912,7 @@ def edit_invoice(invoice_id):
         warehouses_json=warehouses_json,
         financial_locked=financial_locked,
         currency_choices=_invoice_currency_choices(invoice),
+        expense_categories=ExpenseCategory.query.order_by(ExpenseCategory.name).all(),
         **_billing_edit_context(invoice),
         **_bill_to_edit_context(invoice),
     )
@@ -1330,14 +1352,12 @@ def generate_from_time(invoice_id):
 
         total_prepaid_allocated = Decimal("0")
         prepaid_allocator = None
+        missing_rate_warnings = []
 
         # Process time entries
         if selected_entries:
             from app.models import Settings
-            from app.utils.invoice_time_entry_items import (
-                build_invoice_items_from_entries,
-                resolve_group_time_entries_from_form,
-            )
+            from app.utils.invoice_time_entry_items import build_time_entry_lines, resolve_group_time_entries_from_form
 
             time_entries = TimeEntry.query.filter(TimeEntry.id.in_(entry_ids)).all()
 
@@ -1351,16 +1371,15 @@ def generate_from_time(invoice_id):
                 request.form.get("per_entry_lines") == "on",
                 default_group,
             )
-            hourly_rate = RateOverride.resolve_rate(invoice.project)
-            items = build_invoice_items_from_entries(
+            lines = build_time_entry_lines(
                 invoice.id,
                 processed_entries,
-                hourly_rate,
                 group=group_entries,
                 project_name=invoice.project.name if invoice.project else None,
             )
-            for item in items:
+            for item in lines.items:
                 db.session.add(item)
+            missing_rate_warnings = lines.missing_rates
 
         # Process project costs
         if selected_costs:
@@ -1372,7 +1391,7 @@ def generate_from_time(invoice_id):
                 # Create invoice item for each cost
                 item = InvoiceItem(
                     invoice_id=invoice.id,
-                    description=f"{cost.description} ({cost.category.title()})",
+                    description=f"{cost.description} ({cost.category_name})",
                     quantity=1,  # Costs are typically a single unit
                     unit_price=cost.amount,
                 )
@@ -1439,6 +1458,15 @@ def generate_from_time(invoice_id):
             )
         else:
             flash(_("Invoice updated successfully"), "success")
+        for missing in missing_rate_warnings:
+            flash(
+                _(
+                    "%(hours)s h were added at 0: no hourly rate for %(target)s",
+                    hours=str(missing.rounded_hours),
+                    target=missing.target,
+                ),
+                "warning",
+            )
         if total_prepaid_allocated and total_prepaid_allocated > 0:
             flash(
                 _(

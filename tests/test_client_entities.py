@@ -362,3 +362,82 @@ def test_module_off_draft_keeps_its_entity(app, admin_authenticated_client, user
     db.session.refresh(inv)
     assert inv.client_entity_id == entity.id
     assert inv.buyer_snapshot["vat_number"] == "ESB12345678"  # no refresh while the module is off
+
+
+# --- together with the Legal entities module (billing_entities) ------------------------------------
+
+
+@pytest.fixture
+def seller(app):
+    from app.models import BillingEntity, PaymentAccount
+
+    e = BillingEntity(short_name="Seller One", legal_name="SELLER ONE LLC", number_format="S1-{YYYY}-{MM}")
+    db.session.add(e)
+    db.session.commit()
+    a = PaymentAccount(
+        billing_entity_id=e.id, currency="EUR", iban="DE89370400440532013000", details_text="IBAN {IBAN}"
+    )
+    db.session.add(a)
+    db.session.commit()
+    return e, a
+
+
+def _modules_off(*ids):
+    settings = Settings.get_settings()
+    settings.disabled_module_ids = list(ids)
+    db.session.commit()
+
+
+@pytest.mark.parametrize(
+    "off, has_seller_block, has_bill_to",
+    [
+        ([], True, True),
+        (["billing_entities"], False, True),
+        (["client_entities"], True, False),
+        (["billing_entities", "client_entities"], False, False),
+    ],
+)
+def test_form_per_module_combination(
+    app, authenticated_client, project, seller, entity, off, has_seller_block, has_bill_to
+):
+    _modules_off(*off)
+    html = authenticated_client.get("/invoices/create").get_data(as_text=True)
+    assert ('id="billingSellerBlock"' in html) is has_seller_block
+    assert ('id="billToBlock"' in html) is has_bill_to
+    if has_seller_block:
+        assert "data-bill-to-host" in html and 'id="billToSlot"' in html and 'id="billToPreviewSlot"' in html
+
+
+@pytest.mark.parametrize(
+    "off", [[], ["billing_entities"], ["client_entities"], ["billing_entities", "client_entities"]]
+)
+def test_create_invoice_per_module_combination(app, authenticated_client, project, test_client, seller, entity, off):
+    _modules_off(*off)
+    billing_entity, account = seller
+    resp = authenticated_client.post(
+        "/invoices/create",
+        data=_create_form(
+            project,
+            test_client,
+            billing_entity_id=billing_entity.id,
+            payment_account_id=account.id,
+            client_entity_id=entity.id,
+        ),
+    )
+    assert resp.status_code == 302
+    inv = _newest_invoice()
+    assert (inv.billing_entity_id == billing_entity.id) is ("billing_entities" not in off)
+    assert (inv.client_entity_id == entity.id) is ("client_entities" not in off)
+
+
+def test_pdf_prints_seller_and_buyer(app, user, project, test_client, seller, entity):
+    from app.utils import billing_entities as billing
+    from app.utils.pdf_generator import InvoicePDFGenerator
+
+    billing_entity, account = seller
+    inv = _invoice_for(project, test_client, user, entity)
+    billing.apply_to_invoice(inv, billing_entity, account)
+    db.session.commit()
+    html = InvoicePDFGenerator(inv)._generate_html()
+    assert "SELLER ONE LLC" in html
+    assert "ESB12345678" in html

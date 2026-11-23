@@ -3,7 +3,7 @@ Service for invoice business logic.
 """
 
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
@@ -110,13 +110,8 @@ class InvoiceService:
         # Generate invoice number
         invoice_number = self.invoice_repo.generate_invoice_number()
 
-        # Calculate totals
+        # Totals are recomputed from the line items below (rate per entry)
         subtotal = Decimal("0.00")
-        for entry in entries:
-            if entry.duration_seconds:
-                hours = Decimal(str(entry.duration_seconds / 3600))
-                rate = project.hourly_rate or Decimal("0.00")
-                subtotal += hours * rate
 
         # Resolve tax rate and currency from project/client/settings
         resolved_issue_date = issue_date or date.today()
@@ -150,22 +145,20 @@ class InvoiceService:
 
         # Create invoice items from time entries
         from app.models import Settings
-        from app.utils.invoice_time_entry_items import build_invoice_items_from_entries
+        from app.utils.invoice_time_entry_items import build_time_entry_lines
 
         settings = Settings.get_settings()
         group_entries = getattr(settings, "invoice_group_time_entries", True) if settings else True
-        rate = project.hourly_rate or Decimal("0.00")
-        items = build_invoice_items_from_entries(
+        lines = build_time_entry_lines(
             invoice.id,
             entries,
-            rate,
             group=group_entries,
             project_name=project.name,
         )
-        for item in items:
+        for item in lines.items:
             db.session.add(item)
 
-        grouped_entries = items  # for telemetry line_item_count
+        grouped_entries = lines.items  # for telemetry line_item_count
 
         if include_expenses:
             from app.models import Expense
@@ -209,7 +202,12 @@ class InvoiceService:
         record_invoice_created()
         record_invoice_duration_seconds(time.monotonic() - t0, "create")
 
-        return {"success": True, "message": "Invoice created successfully", "invoice": invoice}
+        return {
+            "success": True,
+            "message": "Invoice created successfully",
+            "invoice": invoice,
+            "warnings": lines.warnings,
+        }
 
     def create_invoice(
         self,
@@ -783,6 +781,15 @@ class InvoiceService:
             "other_project_names": other_project_names,
         }
 
+        pending_approval_entry_ids = self.pending_approval_entry_ids([e.id for e in unbilled_entries])
+        warning = None
+        if pending_approval_entry_ids:
+            warning = (
+                f"{len(pending_approval_entry_ids)} unbilled time "
+                f"{'entry has' if len(pending_approval_entry_ids) == 1 else 'entries have'} "
+                "pending approval and should be confirmed before invoicing."
+            )
+
         return {
             "time_entries": unbilled_entries,
             "grouped_time_entries": grouped_time_entries,
@@ -799,7 +806,26 @@ class InvoiceService:
             "prepaid_reset_day": invoice.client.prepaid_reset_day if invoice.client else None,
             "diagnostics": diagnostics,
             "invoice_group_time_entries": invoice_group_time_entries,
+            "pending_approval_entry_ids": pending_approval_entry_ids,
+            "warning": warning,
         }
+
+    @staticmethod
+    def pending_approval_entry_ids(entry_ids: List[int]) -> List[int]:
+        """Return time entry IDs that currently have a pending TimeEntryApproval."""
+        if not entry_ids:
+            return []
+        from app.models.time_entry_approval import ApprovalStatus, TimeEntryApproval
+
+        rows = (
+            TimeEntryApproval.query.filter(
+                TimeEntryApproval.time_entry_id.in_(entry_ids),
+                TimeEntryApproval.status == ApprovalStatus.PENDING,
+            )
+            .with_entities(TimeEntryApproval.time_entry_id)
+            .all()
+        )
+        return sorted({r[0] for r in rows})
 
     def _time_entry_hours_decimal(self, entry: TimeEntry) -> Decimal:
         if not entry.duration_seconds:
@@ -927,7 +953,7 @@ class InvoiceService:
                 "blocked_reason": br,
             }
 
-        from app.models import RateOverride
+        from app.utils.invoice_time_entry_items import build_time_entry_lines
 
         entries: List[TimeEntry] = state["unbilled_entries"]
         groups: Dict[int, List[TimeEntry]] = state["groups"]
@@ -935,13 +961,24 @@ class InvoiceService:
 
         total_hours = sum(self._time_entry_hours_decimal(e) for e in entries)
         estimated = Decimal("0")
+        rate_warnings: List[str] = []
         for pid, elist in groups.items():
             proj = projects_by_id.get(pid)
             if not proj:
                 continue
-            hrs = sum(self._time_entry_hours_decimal(e) for e in elist)
-            rate = RateOverride.resolve_rate(proj)
-            estimated += hrs * rate
+            # Same lines create_client_unbilled_invoice builds; nothing is added to the session
+            lines = build_time_entry_lines(None, elist, group=True, group_by_task=False, project_name=proj.name)
+            estimated += sum((item.line_net for item in lines.items), Decimal("0"))
+            rate_warnings.extend(lines.warnings)
+
+        pending_approval_entry_ids = self.pending_approval_entry_ids([e.id for e in entries])
+        warning = None
+        if pending_approval_entry_ids:
+            warning = (
+                f"{len(pending_approval_entry_ids)} unbilled time "
+                f"{'entry has' if len(pending_approval_entry_ids) == 1 else 'entries have'} "
+                "pending approval and should be confirmed before invoicing."
+            )
 
         return {
             "entry_count": len(entries),
@@ -949,6 +986,119 @@ class InvoiceService:
             "estimated_total": float(estimated.quantize(Decimal("0.01"))),
             "currency": currency,
             "blocked_reason": None,
+            "pending_approval_entry_ids": pending_approval_entry_ids,
+            "warning": warning,
+            "rate_warnings": rate_warnings,
+        }
+
+    def get_unbilled_report(
+        self,
+        *,
+        client_id: Optional[int] = None,
+        project_id: Optional[int] = None,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Unbilled hours and amount per project using invoice rate resolution."""
+        from sqlalchemy.orm import joinedload
+
+        from app.models import Project, RateOverride, Settings
+
+        query = TimeEntry.query.options(joinedload(TimeEntry.project), joinedload(TimeEntry.user)).filter(
+            TimeEntry.end_time.isnot(None),
+            TimeEntry.billable == True,  # noqa: E712
+            TimeEntry.project_id.isnot(None),
+        )
+        if project_id:
+            query = query.filter(TimeEntry.project_id == project_id)
+        if client_id:
+            query = query.filter(
+                db.or_(
+                    TimeEntry.client_id == client_id,
+                    TimeEntry.project_id.in_(
+                        db.session.query(Project.id).filter(Project.client_id == client_id).scalar_subquery()
+                    ),
+                )
+            )
+        if start_dt:
+            query = query.filter(TimeEntry.start_time >= start_dt)
+        if end_dt:
+            query = query.filter(TimeEntry.start_time <= end_dt)
+
+        entries = query.order_by(TimeEntry.start_time.asc()).all()
+        if not entries:
+            settings = Settings.get_settings()
+            return {
+                "projects": [],
+                "total_hours": 0.0,
+                "total_amount": 0.0,
+                "currency": settings.currency if settings else "EUR",
+                "pending_approval_entry_ids": [],
+                "warning": None,
+            }
+
+        # Group by client for billed-id lookup, then filter unbilled
+        by_client: Dict[Optional[int], List[TimeEntry]] = {}
+        for entry in entries:
+            cid = entry.client_id
+            if cid is None and entry.project is not None:
+                cid = entry.project.client_id
+            by_client.setdefault(cid, []).append(entry)
+
+        unbilled: List[TimeEntry] = []
+        for cid, client_entries in by_client.items():
+            billed = self._billed_time_entry_ids_for_client(cid) if cid else set()
+            unbilled.extend(e for e in client_entries if e.id not in billed)
+
+        projects_by_id: Dict[int, Any] = {}
+        for entry in unbilled:
+            if entry.project_id and entry.project_id not in projects_by_id:
+                projects_by_id[entry.project_id] = entry.project
+
+        by_project: Dict[int, List[TimeEntry]] = {}
+        for entry in unbilled:
+            by_project.setdefault(entry.project_id, []).append(entry)
+
+        project_rows = []
+        total_hours = Decimal("0")
+        total_amount = Decimal("0")
+        for pid, elist in sorted(by_project.items(), key=lambda x: x[0]):
+            proj = projects_by_id.get(pid)
+            hrs = sum((self._time_entry_hours_decimal(e) for e in elist), Decimal("0"))
+            rate = RateOverride.resolve_rate(proj) if proj else Decimal("0")
+            amount = (hrs * rate).quantize(Decimal("0.01"))
+            total_hours += hrs
+            total_amount += amount
+            project_rows.append(
+                {
+                    "project_id": pid,
+                    "project_name": proj.name if proj else None,
+                    "client_id": proj.client_id if proj else None,
+                    "entry_count": len(elist),
+                    "hours": float(hrs),
+                    "hourly_rate": float(rate),
+                    "amount": float(amount),
+                    "entry_ids": [e.id for e in elist],
+                }
+            )
+
+        settings = Settings.get_settings()
+        pending_approval_entry_ids = self.pending_approval_entry_ids([e.id for e in unbilled])
+        warning = None
+        if pending_approval_entry_ids:
+            warning = (
+                f"{len(pending_approval_entry_ids)} unbilled time "
+                f"{'entry has' if len(pending_approval_entry_ids) == 1 else 'entries have'} "
+                "pending approval and should be confirmed before invoicing."
+            )
+
+        return {
+            "projects": project_rows,
+            "total_hours": float(total_hours),
+            "total_amount": float(total_amount.quantize(Decimal("0.01"))),
+            "currency": settings.currency if settings else "EUR",
+            "pending_approval_entry_ids": pending_approval_entry_ids,
+            "warning": warning,
         }
 
     def create_client_unbilled_invoice(self, client_id: int, acting_user_id: int) -> Dict[str, Any]:
@@ -958,7 +1108,8 @@ class InvoiceService:
         Returns:
             success + invoice_id, invoice_number, total, item_count; or success False + error/message.
         """
-        from app.models import Client, RateOverride, Settings
+        from app.models import Client, Settings
+        from app.utils.invoice_time_entry_items import build_time_entry_lines
 
         state = self._client_unbilled_invoice_state(client_id)
         if state.get("error") == "not_found":
@@ -1045,26 +1196,18 @@ class InvoiceService:
         db.session.flush()
 
         item_count = 0
+        warnings: List[str] = []
         for pid in sorted(groups.keys()):
             elist = groups[pid]
             proj = projects_by_id.get(pid)
             if not proj:
                 continue
-            total_h = sum(self._time_entry_hours_decimal(e) for e in elist)
-            if total_h <= 0:
-                continue
-            rate = RateOverride.resolve_rate(proj)
-            desc = f"Project: {proj.name}"
-            tids = ",".join(str(e.id) for e in elist)
-            item = InvoiceItem(
-                invoice_id=invoice.id,
-                description=desc,
-                quantity=total_h,
-                unit_price=rate,
-                time_entry_ids=tids,
-            )
-            db.session.add(item)
-            item_count += 1
+            # One line per project and rate: entries with different rates get separate lines
+            lines = build_time_entry_lines(invoice.id, elist, group=True, group_by_task=False, project_name=proj.name)
+            for item in lines.items:
+                db.session.add(item)
+                item_count += 1
+            warnings.extend(lines.warnings)
 
         invoice.calculate_totals()
 
@@ -1089,6 +1232,7 @@ class InvoiceService:
             "total": float(invoice.total_amount),
             "item_count": item_count,
             "invoice": invoice,
+            "warnings": warnings,
         }
 
     def user_can_access_invoice(self, invoice: Invoice, user_id: int, is_admin: bool) -> bool:
@@ -1206,7 +1350,7 @@ class InvoiceService:
     ) -> Dict[str, Any]:
         """Add grouped line items from billable time entries to an existing invoice."""
         from app.models import Settings
-        from app.utils.invoice_time_entry_items import build_invoice_items_from_entries
+        from app.utils.invoice_time_entry_items import build_time_entry_lines
 
         invoice = self.invoice_repo.get_by_id(invoice_id)
         if not invoice:
@@ -1235,15 +1379,13 @@ class InvoiceService:
         group_entries = (
             group if group is not None else getattr(settings, "invoice_group_time_entries", True) if settings else True
         )
-        rate = project.hourly_rate or Decimal("0.00")
-        items = build_invoice_items_from_entries(
+        lines = build_time_entry_lines(
             invoice.id,
             entries,
-            rate,
             group=group_entries,
             project_name=project.name,
         )
-        for item in items:
+        for item in lines.items:
             db.session.add(item)
 
         invoice.calculate_totals()
@@ -1253,7 +1395,12 @@ class InvoiceService:
                 "message": "Could not generate items due to a database error",
                 "error": "database_error",
             }
-        return {"success": True, "message": "Invoice items generated from time entries", "invoice": invoice}
+        return {
+            "success": True,
+            "message": "Invoice items generated from time entries",
+            "invoice": invoice,
+            "warnings": lines.warnings,
+        }
 
     def generate_pdf_bytes(
         self,
