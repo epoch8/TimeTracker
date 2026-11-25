@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from app import db
 from app.models import Invoice, InvoiceItem, RecurringInvoice, Settings, TimeEntry
 from app.repositories.recurring_invoice_repository import RecurringInvoiceRepository
+from app.utils.timezone import now_in_app_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ class RecurringInvoiceService:
         settings = Settings.get_settings()
         currency_code = recurring_invoice.currency_code or (settings.currency if settings else "EUR")
 
-        issue_date = datetime.utcnow().date()
+        issue_date = now_in_app_timezone().date()
         due_date = issue_date + timedelta(days=recurring_invoice.due_date_days)
 
         invoice_number = Invoice.generate_invoice_number()
@@ -99,20 +100,15 @@ class RecurringInvoiceService:
         if not unbilled_entries:
             return
 
-        from app.models import Settings
-        from app.utils.invoice_time_entry_items import build_time_entry_lines
-
-        settings = Settings.get_settings()
-        group_entries = getattr(settings, "invoice_group_time_entries", True) if settings else True
-        lines = build_time_entry_lines(
-            invoice.id,
+        # A recurring invoice has no layout of its own: lines follow the global grouping setting, and
+        # the generated invoice does not change the project's default
+        lines = time_links.add_entries(
+            invoice,
             unbilled_entries,
-            group=group_entries,
-            project_name=recurring_invoice.project.name if recurring_invoice.project else None,
+            time_links.settings_layout(),
+            created_by=recurring_invoice.created_by,
+            project=recurring_invoice.project,
+            remember=False,
         )
-        for item in lines.items:
-            db.session.add(item)
-        db.session.flush()
-        time_links.link_items(invoice, lines.items, created_by=recurring_invoice.created_by)
         for message in lines.warnings:
             logger.warning("Recurring invoice %s: %s", recurring_invoice.id, message)

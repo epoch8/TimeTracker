@@ -15,6 +15,9 @@ from app.utils.db import safe_commit
 from app.utils.event_bus import emit_event
 from app.utils.transactions import transactional
 
+# Why a status change to Cancelled is refused for an invoice with payments
+HAS_PAYMENTS_MESSAGE = "This invoice has payments. Use Correct → Credit note, or remove the payments first."
+
 
 class InvoiceService:
     """Service for invoice operations"""
@@ -86,9 +89,14 @@ class InvoiceService:
         issue_date: Optional[date] = None,
         due_date: Optional[date] = None,
         include_expenses: bool = False,
+        hours_layout: Optional[str] = None,
+        line_template: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create an invoice from time entries.
+
+        ``hours_layout`` and ``line_template`` say how the hours become lines; by default the
+        project's last ones, else the global grouping setting.
 
         Returns:
             dict with 'success', 'message', and 'invoice' keys
@@ -159,21 +167,9 @@ class InvoiceService:
         db.session.flush()
 
         # Create invoice items from time entries
-        from app.models import Settings
-        from app.utils.invoice_time_entry_items import build_time_entry_lines
-
-        settings = Settings.get_settings()
-        group_entries = getattr(settings, "invoice_group_time_entries", True) if settings else True
-        lines = build_time_entry_lines(
-            invoice.id,
-            entries,
-            group=group_entries,
-            project_name=project.name,
+        lines = time_links.add_entries(
+            invoice, entries, hours_layout, line_template, created_by=created_by, project=project
         )
-        for item in lines.items:
-            db.session.add(item)
-        db.session.flush()
-        time_links.link_items(invoice, lines.items, created_by=created_by)
 
         grouped_entries = lines.items  # for telemetry line_item_count
 
@@ -369,15 +365,211 @@ class InvoiceService:
         db.session.flush()
         return invoice
 
+    def transition_status(
+        self,
+        invoice: Invoice,
+        new_status: str,
+        *,
+        actor_id: Optional[int] = None,
+        payment_reference: Optional[str] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Apply an allowed invoice status change and its side effects.
+
+        Does not commit — callers own the transaction boundary.
+        When *force* is True (e.g. full credit note cancel), skip the transition
+        map but still apply side effects. Reverting a finalized invoice to
+        draft/issued is never allowed, even with force.
+
+        Returns:
+            dict with success, previous_status, status, and optionally error,
+            marked_count, warnings.
+        """
+        import os
+
+        from app.services.invoice_time_service import (
+            ISSUED_STATUSES,
+            InvoiceTimeError,
+            InvoiceTimeService,
+            status_change_allowed,
+        )
+
+        if new_status == "void":
+            new_status = "cancelled"
+
+        previous_status = invoice.status
+        prev = previous_status or "draft"
+
+        if new_status == prev:
+            return {
+                "success": True,
+                "previous_status": previous_status,
+                "status": new_status,
+                "marked_count": 0,
+                "warnings": [],
+            }
+
+        # Once sent/paid/cancelled, the invoice should be treated as immutable (no reverting).
+        if prev in {"sent", "paid", "overdue", "cancelled"} and new_status in {"draft", "issued"}:
+            return {
+                "success": False,
+                "error": "cannot_revert",
+                "message": "Cannot revert finalized invoice",
+                "previous_status": previous_status,
+                "status": previous_status,
+            }
+
+        if not force and not status_change_allowed(prev, new_status):
+            return {
+                "success": False,
+                "error": "invalid_transition",
+                "message": "Invalid status transition",
+                "previous_status": previous_status,
+                "status": previous_status,
+            }
+
+        # Money was received: cancelling would leave the payments with no invoice. A full credit note
+        # (force) cancels it on purpose; anything else goes through Correct or removes the payments first.
+        if not force and new_status == "cancelled":
+            from app.services.invoice_correction_service import InvoiceCorrectionService
+
+            if InvoiceCorrectionService.has_payments(invoice):
+                return {
+                    "success": False,
+                    "error": "has_payments",
+                    "message": HAS_PAYMENTS_MESSAGE,
+                    "previous_status": previous_status,
+                    "status": previous_status,
+                }
+
+        invoice.status = new_status
+
+        try:
+            InvoiceTimeService().on_status_change(invoice, previous_status)
+        except InvoiceTimeError as exc:
+            # Roll back the in-memory status so the session stays consistent for the caller.
+            invoice.status = previous_status
+            return {
+                "success": False,
+                "error": getattr(exc, "code", "invoice_time_error"),
+                "message": str(exc),
+                "previous_status": previous_status,
+                "status": previous_status,
+            }
+
+        # Leaving draft bills the time entries: issued, sent, overdue, or paid (also by a payment that
+        # covers a draft). Idempotent, so a later step (issued -> sent -> paid) changes nothing more.
+        marked_count = 0
+        if new_status in ISSUED_STATUSES:
+            marked_count = self.mark_time_entries_as_paid(invoice)
+
+        # Marking paid by hand settles the balance; a payment that got here already set it (maybe overpaid)
+        if new_status == "paid" and invoice.payment_status not in ("fully_paid", "overpaid"):
+            invoice.amount_paid = invoice.total_amount
+            invoice.payment_status = "fully_paid"
+            if not invoice.payment_date:
+                invoice.payment_date = datetime.utcnow().date()
+            if payment_reference:
+                invoice.payment_reference = payment_reference
+
+        warnings: List[str] = []
+        reduce_on_sent = os.getenv("INVENTORY_REDUCE_ON_INVOICE_SENT", "true").lower() == "true"
+        reduce_on_paid = os.getenv("INVENTORY_REDUCE_ON_INVOICE_PAID", "false").lower() == "true"
+        should_reduce_stock = (new_status == "sent" and reduce_on_sent and previous_status != "sent") or (
+            new_status == "paid" and reduce_on_paid and previous_status != "paid"
+        )
+        if should_reduce_stock:
+            warnings.extend(self._reduce_stock_for_invoice(invoice, actor_id=actor_id))
+
+        return {
+            "success": True,
+            "previous_status": previous_status,
+            "status": new_status,
+            "marked_count": marked_count,
+            "warnings": warnings,
+            "invoice": invoice,
+        }
+
+    def _reduce_stock_for_invoice(self, invoice: Invoice, *, actor_id: Optional[int] = None) -> List[str]:
+        """Reduce inventory for stock line items and extra goods. Returns warning messages."""
+        from app.models import StockMovement, StockReservation, Warehouse, WarehouseStock
+
+        warnings: List[str] = []
+        for item in invoice.items:
+            if item.is_stock_item and item.stock_item_id and item.warehouse_id:
+                try:
+                    reservation = StockReservation.query.filter_by(
+                        stock_item_id=item.stock_item_id,
+                        warehouse_id=item.warehouse_id,
+                        reservation_type="invoice",
+                        reservation_id=invoice.id,
+                        status="reserved",
+                    ).first()
+                    if reservation:
+                        reservation.fulfill()
+                    StockMovement.record_movement(
+                        movement_type="sale",
+                        stock_item_id=item.stock_item_id,
+                        warehouse_id=item.warehouse_id,
+                        quantity=-item.quantity,
+                        moved_by=actor_id,
+                        reference_type="invoice",
+                        reference_id=invoice.id,
+                        unit_cost=item.stock_item.default_cost if item.stock_item else None,
+                        reason=f"Invoice {invoice.invoice_number}",
+                        update_stock=True,
+                    )
+                except Exception as e:
+                    warnings.append(f"Could not reduce stock for item {item.description}: {e}")
+
+        for good in invoice.extra_goods:
+            if not getattr(good, "stock_item_id", None):
+                continue
+            try:
+                warehouse_id = None
+                stock_row = (
+                    WarehouseStock.query.filter_by(stock_item_id=good.stock_item_id)
+                    .join(Warehouse)
+                    .filter(Warehouse.is_active == True)  # noqa: E712
+                    .order_by(WarehouseStock.quantity_on_hand.desc())
+                    .first()
+                )
+                if stock_row:
+                    warehouse_id = stock_row.warehouse_id
+                else:
+                    first_wh = Warehouse.query.filter_by(is_active=True).first()
+                    warehouse_id = first_wh.id if first_wh else None
+                if not warehouse_id:
+                    continue
+                StockMovement.record_movement(
+                    movement_type="sale",
+                    stock_item_id=good.stock_item_id,
+                    warehouse_id=warehouse_id,
+                    quantity=-Decimal(str(good.quantity or 0)),
+                    moved_by=actor_id,
+                    reference_type="invoice_extra_good",
+                    reference_id=invoice.id,
+                    unit_cost=good.stock_item.default_cost if good.stock_item else None,
+                    reason=f"Invoice {invoice.invoice_number} extra good: {good.name}",
+                    update_stock=True,
+                )
+            except Exception as e:
+                warnings.append(f"Could not reduce stock for extra good {good.name}: {e}")
+
+        return warnings
+
     def mark_as_sent(self, invoice_id: int) -> Dict[str, Any]:
         """Mark an invoice as sent and mark associated time entries as paid"""
         from app.models import Invoice
 
         invoice_before = self.invoice_repo.get_by_id(invoice_id)
+        if not invoice_before:
+            return {"success": False, "message": "Invoice not found", "error": "not_found"}
+
         sent_statuses = ("sent", "paid", "overdue", "issued")
         was_first_send = bool(
-            invoice_before
-            and invoice_before.status == "draft"
+            invoice_before.status == "draft"
             and Invoice.query.filter(
                 Invoice.created_by == invoice_before.created_by,
                 Invoice.status.in_(sent_statuses),
@@ -385,13 +577,16 @@ class InvoiceService:
             == 0
         )
 
-        invoice = self.invoice_repo.mark_as_sent(invoice_id)
+        result = self.transition_status(invoice_before, "sent")
+        if not result.get("success"):
+            return {
+                "success": False,
+                "message": result.get("message") or "Could not mark invoice as sent",
+                "error": result.get("error") or "invalid_transition",
+            }
 
-        if not invoice:
-            return {"success": False, "message": "Invoice not found", "error": "not_found"}
-
-        # Mark associated time entries as paid
-        marked_count = self.mark_time_entries_as_paid(invoice)
+        invoice = result["invoice"]
+        marked_count = result.get("marked_count") or 0
 
         if not safe_commit("mark_invoice_sent", {"invoice_id": invoice_id}):
             return {
@@ -508,14 +703,15 @@ class InvoiceService:
         # status transitions only when explicitly allowed (e.g. cancel soft-delete)
         previous_status = invoice.status
         if "status" in kwargs and kwargs.get("_allow_status"):
-            invoice.status = kwargs["status"]
-            from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
-
-            try:
-                InvoiceTimeService().on_status_change(invoice, previous_status)
-            except InvoiceTimeError as exc:
+            result = self.transition_status(invoice, kwargs["status"], actor_id=user_id)
+            if not result.get("success"):
                 db.session.rollback()
-                return {"success": False, "message": str(exc), "error": exc.code}
+                return {
+                    "success": False,
+                    "message": result.get("message") or "Invalid status transition",
+                    "error": result.get("error") or "invalid_transition",
+                }
+            previous_status = result.get("previous_status", previous_status)
 
         if not safe_commit("update_invoice", {"invoice_id": invoice_id, "user_id": user_id}):
             return {
@@ -955,8 +1151,10 @@ class InvoiceService:
                 "blocked_reason": br,
             }
 
-        from app.utils.invoice_time_entry_items import build_time_entry_lines
+        from app.services.invoice_time_service import InvoiceTimeService
+        from app.utils.invoice_time_entry_items import LAYOUT_PROJECT, build_time_entry_lines
 
+        time_links = InvoiceTimeService()
         entries: List[TimeEntry] = state["unbilled_entries"]
         groups: Dict[int, List[TimeEntry]] = state["groups"]
         projects_by_id = state["projects_by_id"]
@@ -969,7 +1167,8 @@ class InvoiceService:
             if not proj:
                 continue
             # Same lines create_client_unbilled_invoice builds; nothing is added to the session
-            lines = build_time_entry_lines(None, elist, group=True, group_by_task=False, project_name=proj.name)
+            layout, template = time_links.resolve_layout(proj, fallback_layout=LAYOUT_PROJECT)
+            lines = build_time_entry_lines(None, elist, layout=layout, template=template, project_name=proj.name)
             estimated += sum((item.line_net for item in lines.items), Decimal("0"))
             rate_warnings.extend(lines.warnings)
 
@@ -1101,7 +1300,7 @@ class InvoiceService:
             success + invoice_id, invoice_number, total, item_count; or success False + error/message.
         """
         from app.models import Client, Settings
-        from app.utils.invoice_time_entry_items import build_time_entry_lines
+        from app.utils.invoice_time_entry_items import LAYOUT_PROJECT
 
         state = self._client_unbilled_invoice_state(client_id)
         if state.get("error") == "not_found":
@@ -1192,24 +1391,26 @@ class InvoiceService:
 
         item_count = 0
         warnings: List[str] = []
-        new_items: List[InvoiceItem] = []
-        for pid in sorted(groups.keys()):
-            elist = groups[pid]
-            proj = projects_by_id.get(pid)
-            if not proj:
-                continue
-            # One line per project and rate: entries with different rates get separate lines
-            lines = build_time_entry_lines(invoice.id, elist, group=True, group_by_task=False, project_name=proj.name)
-            for item in lines.items:
-                db.session.add(item)
-                new_items.append(item)
-                item_count += 1
-            warnings.extend(lines.warnings)
-
         from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
 
+        time_links = InvoiceTimeService()
         try:
-            InvoiceTimeService().link_items(invoice, new_items, created_by=acting_user_id)
+            for pid in sorted(groups.keys()):
+                proj = projects_by_id.get(pid)
+                if not proj:
+                    continue
+                # Each project's hours as on its last invoice, else one line per project (split by rate).
+                # A one-click invoice does not change the project's default.
+                lines = time_links.add_entries(
+                    invoice,
+                    groups[pid],
+                    created_by=acting_user_id,
+                    project=proj,
+                    remember=False,
+                    fallback_layout=LAYOUT_PROJECT,
+                )
+                item_count += len(lines.items)
+                warnings.extend(lines.warnings)
         except InvoiceTimeError as exc:
             db.session.rollback()
             return {"success": False, "error": exc.code, "message": str(exc)}
@@ -1301,12 +1502,16 @@ class InvoiceService:
         except InvoiceTimeError as exc:
             return {"success": False, "message": str(exc), "error": exc.code}
 
-        # The lines are replaced: their links go, and come back for the time entries the new lines list
+        # The lines are replaced: their links go, and come back for the time entries the new lines list.
+        # A row may carry the id of the line it replaces; a time line whose description, quantity or
+        # price changes is marked as edited by hand.
+        previous_lines = time_links.snapshot_lines(invoice)
         previous_hours = time_links.detach_lines(invoice)
         invoice.items.delete()
         new_items: List[InvoiceItem] = []
+        row_ids: List[Any] = []
         for idx, row in enumerate(items):
-            description = (row.get("description") or "").strip()
+            description = time_links.normalize_description(row.get("description"))
             if not description:
                 continue
             try:
@@ -1350,12 +1555,17 @@ class InvoiceService:
             )
             db.session.add(item)
             new_items.append(item)
+            row_ids.append(row.get("id"))
 
         try:
             time_links.link_items(invoice, new_items, hours_by_entry=previous_hours, created_by=user_id)
         except InvoiceTimeError as exc:
             db.session.rollback()
             return {"success": False, "message": str(exc), "error": exc.code}
+        for item, row_id in zip(new_items, row_ids):
+            time_links.carry_line_state(previous_lines, item, row_id)
+        # Entries no line keeps any more give back the prepaid hours they used on this draft
+        time_links.release_dropped_prepaid(invoice, previous_hours.keys())
 
         invoice.calculate_totals()
         if not safe_commit("set_invoice_items", {"invoice_id": invoice_id, "user_id": user_id}):
@@ -1374,10 +1584,15 @@ class InvoiceService:
         is_admin: bool = False,
         replace_existing: bool = True,
         group: Optional[bool] = None,
+        hours_layout: Optional[str] = None,
+        line_template: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Add grouped line items from billable time entries to an existing invoice."""
-        from app.models import Settings
-        from app.utils.invoice_time_entry_items import build_time_entry_lines
+        """Add line items from billable time entries to an existing invoice.
+
+        ``hours_layout`` and ``line_template`` say how the hours become lines; by default the
+        project's last ones (``group`` is the older switch: False means one line per entry).
+        """
+        from app.utils.invoice_time_entry_items import legacy_layout
 
         invoice = self.invoice_repo.get_by_id(invoice_id)
         if not invoice:
@@ -1430,20 +1645,19 @@ class InvoiceService:
             db.session.rollback()
             return {"success": False, "message": "No billable time entries found", "error": "no_entries"}
 
-        settings = Settings.get_settings()
-        group_entries = (
-            group if group is not None else getattr(settings, "invoice_group_time_entries", True) if settings else True
-        )
-        lines = build_time_entry_lines(
-            invoice.id,
+        if hours_layout is None and group is not None:
+            hours_layout = legacy_layout(group)
+        lines = time_links.add_entries(
+            invoice,
             entries,
-            group=group_entries,
-            project_name=project.name,
+            hours_layout,
+            line_template,
+            hours_by_entry=previous_hours,
+            created_by=user_id,
+            project=project,
         )
-        for item in lines.items:
-            db.session.add(item)
-        db.session.flush()
-        time_links.link_items(invoice, lines.items, hours_by_entry=previous_hours, created_by=user_id)
+        # Replaced lines: entries no new line keeps give back the prepaid hours they used on this draft
+        time_links.release_dropped_prepaid(invoice, previous_hours.keys())
 
         invoice.calculate_totals()
         if not safe_commit("add_time_entries_to_invoice", {"invoice_id": invoice_id, "user_id": user_id}):

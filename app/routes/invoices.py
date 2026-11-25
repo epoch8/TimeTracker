@@ -138,7 +138,9 @@ def project_invoices(project_id):
 @invoices_bp.route("/invoices/create", methods=["GET", "POST"])
 @login_required
 def create_invoice():
-    """Create a new invoice"""
+    """Create a new invoice. The page moved to step 1 (``/invoices/new``); posting here still works."""
+    if request.method == "GET":
+        return redirect(url_for("invoices.new_invoice", **request.args.to_dict()))
     if request.method == "POST":
         # Get form data
         project_id = request.form.get("project_id", type=int)
@@ -414,6 +416,829 @@ def _render_create_form(number_error=None, form_due_date=None):
     )
 
 
+# ----------------------------------------------------------------------
+# New invoice, step 1: who bills whom, number, period, projects, how hours become lines
+# ----------------------------------------------------------------------
+_STEP_ONE_VAT_CATEGORIES = ("S", "Z", "E", "AE", "K", "G", "O", "L", "M")
+
+
+class _StepOneInput:
+    """Step 1 values from the posted form or from the page's JSON request, read the same way."""
+
+    def __init__(self, source):
+        self.source = source or {}
+
+    def get(self, name, default=""):
+        value = self.source.get(name, default)
+        if isinstance(value, list):
+            value = value[0] if value else default
+        return default if value is None else value
+
+    def get_int(self, name):
+        try:
+            return int(str(self.get(name, "")).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def get_ids(self, name):
+        raw = self.source.getlist(name) if hasattr(self.source, "getlist") else self.source.get(name)
+        if raw is None:
+            return []
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        ids = []
+        for value in raw:
+            try:
+                number = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if number not in ids:
+                ids.append(number)
+        return ids
+
+    def flag(self, name):
+        return str(self.get(name, "")).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _step_one_projects_query():
+    """Projects the user may invoice, as on the old create form (subcontractors: assigned ones only)."""
+    from app.utils.scope_filter import apply_project_scope_to_model
+
+    query = Project.query.filter(Project.client_id.isnot(None), Project.billable == True)  # noqa: E712
+    scope = apply_project_scope_to_model(Project, current_user)
+    return query.filter(scope) if scope is not None else query
+
+
+def _step_one_clients():
+    """Clients the user may invoice from step 1: those with at least one project the user can see."""
+    from app.models import Client
+
+    client_ids = _step_one_projects_query().with_entities(Project.client_id).distinct()
+    return Client.query.filter(Client.id.in_(client_ids)).order_by(Client.name.asc()).all()
+
+
+def _step_one_client(client_id):
+    """The client, if the user may invoice it (sees at least one of its projects); else None."""
+    from app.models import Client
+
+    if not client_id:
+        return None
+    if _step_one_projects_query().filter(Project.client_id == client_id).first() is None:
+        return None
+    return Client.query.get(client_id)
+
+
+def _step_one_selection(data, client, projects, invoice=None):
+    """Hours part of step 1 as posted. Raises StepOneError for a wrong period.
+
+    Projects the client does not have, or the user may not see, are dropped. Without the
+    ``projects_touched`` flag (the page's first request for a client) the projects with hours in
+    the period are selected, or only the one step 1 was opened from.
+    """
+    from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneSelection, resolve_period
+    from app.utils.invoice_currency import normalize_currency_code
+    from app.utils.invoice_time_entry_items import normalize_layout
+
+    period = resolve_period(data.get("period"), data.get("period_start"), data.get("period_end"))
+    offered = [p.id for p in projects]
+    from_project_id = data.get_int("from_project_id")
+    allowed = _step_one_client_entries_allowed()
+    if data.flag("projects_touched") or invoice is not None:
+        project_ids = [pid for pid in data.get_ids("project_ids") if pid in offered]
+        client_entries = data.flag("client_entries")
+    else:
+        by_project = InvoiceStepOneService().hours_by_project(client, offered, period, invoice, allowed)
+        if from_project_id in offered:
+            project_ids = [from_project_id]
+        else:
+            project_ids = [pid for pid in offered if by_project.get(pid, (0, 0))[1]] or offered[:1]
+        client_entries = from_project_id not in offered and bool(by_project.get(None, (0, 0))[1])
+    return StepOneSelection(
+        client=client,
+        project_ids=[pid for pid in offered if pid in project_ids],
+        period=period,
+        layout=normalize_layout(data.get("hours_layout")),
+        template=(data.get("line_template") or None),
+        client_entries=client_entries,
+        currency=normalize_currency_code(data.get("currency_code")) or (invoice.currency_code if invoice else None),
+        invoice=invoice,
+        primary_project_id=from_project_id if invoice is None else invoice.project_id,
+        client_entries_allowed=allowed,
+    )
+
+
+def _step_one_client_entries_allowed():
+    """Whether the user may bill time logged on a client without a project.
+
+    Not for a user limited to their own or assigned projects: that time is not theirs to see.
+    """
+    from app.utils.scope_filter import apply_project_scope_to_model
+
+    return apply_project_scope_to_model(Project, current_user) is None
+
+
+def _step_one_numbers(selection, issue_date):
+    """{entity id: next number} for the selection's period and issue date (Legal entities module on)."""
+    from app.services.invoice_step_one_service import InvoiceStepOneService
+    from app.utils import billing_entities as billing
+
+    if not billing.module_on():
+        return {}
+    period = InvoiceStepOneService().number_period(selection)
+    return {str(e.id): billing.number_preview(e, issue_date, period=period) for e in billing.active_entities()}
+
+
+def _step_one_header(data, client, period):
+    """Invoice fields of step 1 as posted (all but the number, From and Bill to). Raises StepOneError."""
+    from app.services.invoice_step_one_service import StepOneError
+    from app.utils.invoice_currency import normalize_currency_code
+    from app.utils.invoice_defaults import due_date_for
+
+    def text(name):
+        return (data.get(name) or "").strip()
+
+    def day(name):
+        value = text(name)
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            raise StepOneError(_("Invalid date: %(value)s", value=value))
+
+    try:
+        tax_rate = Decimal(text("tax_rate") or "0")
+    except (InvalidOperation, ValueError):
+        raise StepOneError(_("Invalid tax rate format"))
+    vat_category = text("vat_category").upper() or None
+    if vat_category not in _STEP_ONE_VAT_CATEGORIES:
+        vat_category = None
+    issue_date = day("issue_date") or period.issue_date()
+    due_date = day("due_date") or due_date_for(client.id, issue_date)
+    if due_date < issue_date:
+        raise StepOneError(_("The due date is before the issue date"))
+    return {
+        "client_name": text("client_name") or client.name,
+        "client_email": text("client_email") or None,
+        "client_address": text("client_address") or None,
+        "buyer_reference": text("buyer_reference") or None,
+        "vat_category": vat_category,
+        "vat_exemption_reason": text("vat_exemption_reason") or None,
+        "vat_exemption_code": text("vat_exemption_code") or None,
+        "cig": text("cig") or None,
+        "cup": text("cup") or None,
+        "tax_rate": tax_rate,
+        "notes": text("notes") or None,
+        "terms": text("terms") or None,
+        "issue_date": issue_date,
+        "due_date": due_date,
+        "currency_code": normalize_currency_code(data.get("currency_code")),
+    }
+
+
+def _parse_iso_day(value):
+    try:
+        return datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _hours_label(value):
+    return "%.2f" % Decimal(str(value or 0))
+
+
+def _step_one_warning_texts(summary, currency):
+    """Each warning of Before you create as a sentence, with its link or action."""
+    from flask_babel import format_date, ngettext
+
+    def day(value):
+        try:
+            return format_date(value, "medium")
+        except Exception:
+            return value.isoformat()
+
+    out = []
+    for w in summary.warnings:
+        kind = w["kind"]
+        item = {"kind": kind}
+        if kind == "no_rate":
+            if w.get("project_id"):
+                target = " / ".join(part for part in (w.get("project"), w.get("person")) if part)
+                item["link"] = {
+                    "label": _("Set rate"),
+                    "url": url_for("projects.list_rates", project_id=w["project_id"]),
+                }
+            else:
+                # Logged on the client without a project: the client's default rate applies
+                target = _("time logged on the client")
+                if w.get("client_id"):
+                    item["link"] = {
+                        "label": _("Set client rate"),
+                        "url": url_for("clients.edit_client", client_id=w["client_id"]),
+                    }
+            item["text"] = _(
+                "No hourly rate for %(target)s: %(hours)s h will be billed at 0.", target=target, hours=w["hours"]
+            )
+        elif kind == "prepaid_used_up":
+            item["text"] = _(
+                "%(month)s plan used up on %(invoice)s: these hours are billed at the rate.",
+                month=_prepaid_months_text([w["month"]]),
+                invoice=w["used_on"],
+            )
+        elif kind == "prepaid_left":
+            item["text"] = _(
+                "%(month)s plan: %(left)s h left; %(covers)s h of these hours go to it first.",
+                month=_prepaid_months_text([w["month"]]),
+                left=_hours_label(w["left"]),
+                covers=_hours_label(w["covers"]),
+            )
+        elif kind == "timer_running":
+            item["text"] = ngettext(
+                "A timer is running (%(people)s): that entry is not included.",
+                "%(num)d timers are running (%(people)s): those entries are not included.",
+                w["entries"],
+                people=", ".join(w["people"]),
+            )
+        elif kind == "before_period":
+            item["text"] = _(
+                "%(hours)s h unbilled before the period, since %(since)s.",
+                hours=_hours_label(w["hours"]),
+                since=day(w["since"]),
+            )
+            item["action"] = {"label": _("Include them"), "start": w["since"].isoformat()}
+        elif kind == "other_projects":
+            names = [p["name"] or _("time logged on the client") for p in w["projects"]]
+            item["text"] = _(
+                "%(hours)s h in this period on what is not selected: %(names)s.",
+                hours=_hours_label(w["hours"]),
+                names=", ".join(names),
+            )
+        elif kind == "after_period":
+            item["text"] = ngettext(
+                "%(num)d entry (%(hours)s h) after the period, until %(until)s.",
+                "%(num)d entries (%(hours)s h) after the period, until %(until)s.",
+                w["entries"],
+                hours=_hours_label(w["hours"]),
+                until=day(w["until"]),
+            )
+        elif kind == "non_billable":
+            item["text"] = ngettext(
+                "%(num)d non-billable entry (%(hours)s h) in this period stays off the invoice.",
+                "%(num)d non-billable entries (%(hours)s h) in this period stay off the invoice.",
+                w["entries"],
+                hours=_hours_label(w["hours"]),
+            )
+        elif kind == "manual_lines":
+            item["text"] = ngettext(
+                "%(num)d line added by hand. Saving step 1 keeps it unless you remove it.",
+                "%(num)d lines added by hand. Saving step 1 keeps them unless you remove them.",
+                len(w["lines"]),
+            )
+            item["lines"] = [
+                {
+                    "id": line["id"],
+                    "text": "%s – %s %s" % (line["description"], "%.2f" % line["amount"], currency or ""),
+                }
+                for line in w["lines"]
+            ]
+        else:
+            continue
+        out.append(item)
+    return out
+
+
+def _step_one_parts(selection, projects, summary, remove_line_ids=()):
+    """The step 1 blocks that follow the selection, rendered: projects, hours, warnings, summary."""
+    from app.services.invoice_step_one_service import InvoiceStepOneService
+
+    primary = InvoiceStepOneService.primary_project(selection, projects)
+    remove = set(remove_line_ids or ())
+    context = {
+        "remove_line_ids": remove,
+        "invoice": selection.invoice,
+        "primary_id": primary.id if primary is not None else "",
+        "selection": selection,
+        "summary": summary,
+        "projects": projects,
+        "warnings": _step_one_warning_texts(summary, selection.currency),
+        "currency": selection.currency or "",
+        "hours_label": _hours_label,
+        "prepaid_month": lambda month: _prepaid_months_text([month]),
+    }
+    return {
+        "projects": render_template("invoices/_step1_projects.html", **context),
+        "hours": render_template("invoices/_step1_hours.html", **context),
+        "warnings": render_template("invoices/_step1_warnings.html", **context),
+        "summary": render_template("invoices/_step1_summary.html", **context),
+    }
+
+
+def _step_one_payload(selection, projects, summary, remove_line_ids=()):
+    period = summary.period
+    examples = {}
+    for layout, info in summary.examples.items():
+        if layout == "none":
+            examples[layout] = _("No hours lines")
+        elif info["lines"]:
+            examples[layout] = info["example"] + (
+                "\n" + _("%(count)s lines in all", count=info["lines"]) if info["lines"] > 1 else ""
+            )
+        else:
+            examples[layout] = ""
+    return {
+        "html": _step_one_parts(selection, projects, summary, remove_line_ids),
+        "project_ids": selection.project_ids,
+        "client_entries": selection.client_entries,
+        "period": {
+            "kind": period.kind,
+            "start": period.start.isoformat() if period.start else "",
+            "end": period.end.isoformat() if period.end else "",
+            "issue_date": period.issue_date().isoformat(),
+        },
+        "layout": summary.layout,
+        "template": summary.template,
+        "examples": examples,
+        "lines": summary.lines,
+        "hours": _hours_label(summary.tracked_hours),
+    }
+
+
+def _step_one_values(form=None, invoice=None):
+    """Field values the step 1 page starts with: as posted, else from the draft, else empty."""
+    names = (
+        "client_name",
+        "client_email",
+        "client_address",
+        "buyer_reference",
+        "vat_category",
+        "vat_exemption_reason",
+        "vat_exemption_code",
+        "cig",
+        "cup",
+        "tax_rate",
+        "notes",
+        "terms",
+        "issue_date",
+        "due_date",
+        "currency_code",
+        "invoice_number",
+    )
+    if form is not None:
+        return {name: (form.get(name) or "") for name in names}
+    if invoice is None:
+        return {name: "" for name in names}
+    values = {name: "" if getattr(invoice, name, None) is None else str(getattr(invoice, name)) for name in names}
+    values["issue_date"] = invoice.issue_date.isoformat() if invoice.issue_date else ""
+    values["due_date"] = invoice.due_date.isoformat() if invoice.due_date else ""
+    values["tax_rate"] = str(invoice.tax_rate if invoice.tax_rate is not None else "")
+    return values
+
+
+def _step_one_projects_by_client(clients):
+    """{client_id: [projects the user can see]}, in one query."""
+    ids = [c.id for c in clients]
+    if not ids:
+        return {}
+    out = {}
+    query = _step_one_projects_query().filter(Project.client_id.in_(ids))
+    for project in query.order_by(Project.name.asc(), Project.id.asc()).all():
+        out.setdefault(project.client_id, []).append(project)
+    return out
+
+
+def _render_step_one(invoice=None, selection=None, form=None, number_error=None, status=200):
+    """The step 1 page, for a new invoice or for a draft (``invoice``).
+
+    ``form``: what was posted, shown again after an error; ``number_error``: the number is taken.
+    """
+    from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneError, resolve_period
+    from app.utils.billing_entities import form_context as billing_form_context
+    from app.utils.billing_entities import invoice_ref
+    from app.utils.client_entities import form_context as bill_to_form_context
+    from app.utils.invoice_currency import currency_choices, default_currencies_by_client, settings_currency
+    from app.utils.invoice_defaults import DEFAULT_DUE_DAYS, client_defaults, due_date_for
+    from app.utils.invoice_time_entry_items import DEFAULT_LINE_TEMPLATES, HOURS_LAYOUT_LABELS, HOURS_LAYOUTS
+
+    service = InvoiceStepOneService()
+    settings = Settings.get_settings()
+    data = _StepOneInput(form if form is not None else request.args)
+    if invoice is not None:
+        client = invoice.client
+        clients = [client]
+        if selection is None:
+            selection = service.draft_selection(invoice)
+    else:
+        clients = _step_one_clients()
+        from_project_id = data.get_int("from_project_id") or data.get_int("project_id")
+        from_project = Project.query.get(from_project_id) if from_project_id else None
+        client_id = data.get_int("client_id") or (from_project.client_id if from_project else None)
+        client = next((c for c in clients if c.id == client_id), None)
+    projects_by_client = _step_one_projects_by_client(clients)
+    projects = service.client_projects(client, current_user, invoice) if client is not None else []
+
+    if client is not None and selection is None:
+        source = {key: data.source.getlist(key) for key in data.source} if hasattr(data.source, "getlist") else {}
+        if invoice is None and from_project is not None and from_project.client_id == client.id:
+            source["from_project_id"] = [str(from_project.id)]
+        try:
+            selection = _step_one_selection(_StepOneInput(source), client, projects)
+        except StepOneError:
+            selection = _step_one_selection(_StepOneInput({}), client, projects)
+    remove_line_ids = data.get_ids("remove_line_ids") if form is not None else []
+    parts = (
+        _step_one_parts(selection, projects, service.summary(selection, projects, remove_line_ids), remove_line_ids)
+        if selection
+        else None
+    )
+
+    posted = None
+    if number_error is not None:
+        posted = {
+            "number": number_error.number,
+            "preview": (form.get("invoice_number_preview", "") or "").strip(),
+            "taken": invoice_ref(number_error.owner),
+            "next_free": number_error.next_free or "",
+            "entity_id": form.get("billing_entity_id", type=int),
+            "account_id": form.get("payment_account_id", type=int),
+            "client_entity_id": form.get("client_entity_id", type=int),
+        }
+    primary = service.primary_project(selection, projects) if selection is not None else None
+    # The From / Pay to and Bill to blocks follow #project_id (the invoice's own project), which the
+    # page's script keeps in step with the client and the selected projects
+    form_projects = [invoice.project] if invoice is not None else [p for ps in projects_by_client.values() for p in ps]
+    defaults = client_defaults([c.id for c in clients])
+    values = _step_one_values(form, invoice)
+    # Dates typed or saved stay; the page's script moves the others with the period
+    dates_touched = {name: invoice is not None or bool(values[name]) for name in ("issue_date", "due_date")}
+    if client is not None and selection is not None:
+        # Issue date: the last day of the period; due date: as many days later as on the client's last invoice
+        issued = _parse_iso_day(values["issue_date"]) or selection.period.issue_date()
+        values["issue_date"] = values["issue_date"] or issued.isoformat()
+        values["due_date"] = values["due_date"] or due_date_for(client.id, issued).isoformat()
+    number_issue = _parse_iso_day(values["issue_date"])
+    number_period = service.number_period(selection) if selection is not None else None
+    return (
+        render_template(
+            "invoices/new.html",
+            invoice=invoice,
+            clients=clients,
+            client=client,
+            projects=projects,
+            selection=selection,
+            period=selection.period if selection is not None else resolve_period(None),
+            primary_project=primary,
+            parts=parts,
+            values=values,
+            dates_touched=dates_touched,
+            posted=posted,
+            settings=settings,
+            currency_choices=currency_choices(settings, extra=[invoice.currency_code] if invoice else ()),
+            client_currencies={str(k): v for k, v in default_currencies_by_client(settings).items()},
+            default_currency=settings_currency(settings),
+            client_details={
+                str(c.id): {
+                    "name": c.name or "",
+                    "email": c.email or "",
+                    "address": c.address or "",
+                    "project": (projects_by_client.get(c.id) or [None])[0].id if projects_by_client.get(c.id) else None,
+                }
+                for c in clients
+            },
+            invoice_defaults={
+                "byClient": {str(k): v for k, v in defaults.items()},
+                "settingsTerms": settings.invoice_terms or "",
+                "defaultDays": DEFAULT_DUE_DAYS,
+                "today": date.today().isoformat(),
+            },
+            hours_layouts=[(layout, HOURS_LAYOUT_LABELS[layout]) for layout in HOURS_LAYOUTS],
+            default_line_templates=DEFAULT_LINE_TEMPLATES,
+            **billing_form_context(form_projects, settings, issue_date=number_issue, period=number_period),
+            **bill_to_form_context(form_projects, invoice=invoice),
+        ),
+        status,
+    )
+
+
+@invoices_bp.route("/invoices/new", methods=["GET", "POST"])
+@login_required
+def new_invoice():
+    """Step 1 of a new invoice: who bills whom, number, period, projects and how hours become lines.
+
+    Creating it makes a draft with its hours lines in one transaction; the draft page is next.
+    ``?client_id=`` preselects a client, ``?project_id=`` a client and only that project.
+    """
+    if request.method == "GET":
+        return _render_step_one()
+
+    from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneError
+    from app.services.invoice_time_service import InvoiceTimeError
+    from app.utils import billing_entities as billing
+    from app.utils import client_entities as bill_to
+
+    form = request.form
+    data = _StepOneInput(form)
+    service = InvoiceStepOneService()
+    client = _step_one_client(data.get_int("client_id"))
+    if client is None:
+        flash(_("Choose a client"), "error")
+        return _render_step_one(form=form, status=400)
+    projects = service.client_projects(client, current_user)
+    try:
+        selection = _step_one_selection(data, client, projects)
+        header = _step_one_header(data, client, selection.period)
+    except StepOneError as exc:
+        flash(str(exc), "error")
+        return _render_step_one(form=form, status=400)
+    primary = service.primary_project(selection, projects)
+    if primary is None:
+        flash(_("Select at least one project: the invoice needs one"), "error")
+        return _render_step_one(form=form, selection=selection, status=400)
+
+    settings = Settings.get_settings()
+    from app.utils.invoice_currency import default_currency_for_client
+
+    currency_code = header.pop("currency_code") or default_currency_for_client(client.id, settings)
+    selection.currency = currency_code
+    _t0 = time.monotonic()
+
+    billing_entity = payment_account = None
+    if billing.module_on():
+        billing_entity, payment_account, billing_error = billing.resolve_from_form(form, currency_code)
+        if billing_error:
+            flash(_(billing_error), "error")
+            return _render_step_one(form=form, selection=selection, status=400)
+
+    # The number: typed by hand, else the entity's format, else the global series. A number another
+    # invoice already has is an error here, never a silent "-2".
+    # {YYYY} and {MM} are the month the invoice bills, {DD} its issue day
+    invoice_number = None
+    typed_number = (form.get("invoice_number", "") or "").strip()
+    preview_number = (form.get("invoice_number_preview", "") or "").strip()
+    issue_date = header["issue_date"]
+    number_period = service.number_period(selection)
+    try:
+        if billing_entity:
+            if typed_number and typed_number != preview_number:
+                billing.check_number(billing_entity, typed_number, issue_date, period=number_period)
+                billing.claim_number(billing_entity, typed_number, issue_date, period=number_period)
+                invoice_number = typed_number
+            else:
+                invoice_number = billing.allocate_invoice_number(billing_entity, issue_date, period=number_period)
+    except billing.NumberTaken as taken:
+        db.session.rollback()
+        return _render_step_one(form=form, selection=selection, number_error=taken, status=409)
+    if not invoice_number:
+        invoice_number = Invoice.generate_invoice_number()
+
+    invoice = Invoice(
+        invoice_number=invoice_number,
+        project_id=primary.id,
+        client_name=header.pop("client_name"),
+        due_date=header.pop("due_date"),
+        created_by=current_user.id,
+        client_id=client.id,
+        quote_id=getattr(primary, "quote_id", None),
+        currency_code=currency_code,
+        **header,
+    )
+    invoice.period_start = selection.period.start
+    invoice.period_end = selection.period.end
+    if billing_entity:
+        billing.apply_to_invoice(invoice, billing_entity, payment_account)
+    if bill_to.module_on():
+        bill_to_entity, bill_to_error = bill_to.resolve_from_form(form, client.id)
+        if bill_to_error:
+            db.session.rollback()
+            flash(_(bill_to_error), "error")
+            return _render_step_one(form=form, selection=selection, status=400)
+        bill_to.apply_to_invoice(invoice, bill_to_entity)
+
+    db.session.add(invoice)
+    try:
+        db.session.flush()
+        lines = service.add_hours(invoice, selection, projects, current_user.id)
+    except InvoiceTimeError as exc:
+        db.session.rollback()
+        flash(_("Could not add the time entries: %(error)s", error=str(exc)), "error")
+        return _render_step_one(form=form, selection=selection, status=409)
+    invoice.calculate_totals()
+    if not safe_commit("new_invoice_step_one", {"invoice_number": invoice_number, "client_id": client.id}):
+        flash(_("Could not create invoice due to a database error. Please check server logs."), "error")
+        return _render_step_one(form=form, selection=selection, status=500)
+
+    _announce_new_invoice(invoice, _t0)
+    count = len(lines.items) if lines is not None else 0
+    flash(_("Draft %(number)s created with %(count)s lines", number=invoice.invoice_number, count=count), "success")
+    return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+
+def _announce_new_invoice(invoice, started):
+    """What creating an invoice also does: metrics, analytics, workflows and the client's notification."""
+    from app.telemetry.otel_setup import business_span, record_invoice_created, record_invoice_duration_seconds
+    from app.utils.workflow_bridge import fire_invoice_created_workflow
+
+    has_tax = float(invoice.tax_rate or 0) > 0
+    with business_span(
+        "invoice.create", user_id=current_user.id, source="web", has_tax=has_tax, has_notes=bool(invoice.notes)
+    ):
+        pass
+    record_invoice_created()
+    record_invoice_duration_seconds(time.monotonic() - started, "create")
+    track_invoice_generated(
+        current_user.id,
+        {
+            "invoice_id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "has_tax": has_tax,
+            "has_notes": bool(invoice.notes),
+        },
+    )
+    fire_invoice_created_workflow(invoice, current_user.id)
+    if invoice.client_id:
+        try:
+            from app.services.client_notification_service import ClientNotificationService
+
+            ClientNotificationService().notify_invoice_created(invoice.id, invoice.client_id)
+        except Exception as e:
+            logger.error(f"Failed to send client notification for invoice {invoice.id}: {e}", exc_info=True)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/step-1", methods=["GET", "POST"])
+@login_required
+def edit_step_one(invoice_id):
+    """Step 1 of a draft, every field filled from the invoice.
+
+    Saving with another period, other projects, another layout or template lets go of the draft's
+    hours and collects them again (hours lines are rebuilt, lines added by hand stay, non-billable
+    marks stay). Saving with only the header changed leaves the lines as they are.
+    """
+    from flask_babel import ngettext
+
+    from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneError
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+    from app.utils import billing_entities as billing
+    from app.utils import client_entities as bill_to
+
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if not current_user.is_admin and invoice.created_by != current_user.id:
+        flash(_("You do not have permission to edit this invoice"), "error")
+        return redirect(url_for("invoices.list_invoices"))
+    if invoice.status != "draft":
+        flash(
+            _(
+                "Invoice %(number)s is %(status)s: only a draft goes back to step 1.",
+                number=invoice.invoice_number,
+                status=invoice.status,
+            ),
+            "error",
+        )
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+    if request.method == "GET":
+        return _render_step_one(invoice)
+
+    form = request.form
+    data = _StepOneInput(form)
+    service = InvoiceStepOneService()
+    client = invoice.client
+    projects = service.client_projects(client, current_user, invoice)
+    try:
+        selection = _step_one_selection(data, client, projects, invoice)
+        header = _step_one_header(data, client, selection.period)
+    except StepOneError as exc:
+        flash(str(exc), "error")
+        return _render_step_one(invoice, form=form, status=400)
+    primary = service.primary_project(selection, projects)
+    if primary is None:
+        flash(_("Select at least one project: the invoice needs one"), "error")
+        return _render_step_one(invoice, selection=selection, form=form, status=400)
+    before = service.draft_selection(invoice)
+
+    # The number may change on a draft; another invoice's number is refused. {YYYY} and {MM} are
+    # the month the invoice bills and {DD} its issue day, as for a new invoice
+    typed_number = (form.get("invoice_number", "") or "").strip()
+    if typed_number and typed_number != invoice.invoice_number:
+        entity = invoice.billing_entity if invoice.billing_entity_id else None
+        posted_entity_id = form.get("billing_entity_id", type=int)
+        if billing.module_on() and posted_entity_id and posted_entity_id != invoice.billing_entity_id:
+            from app.models import BillingEntity
+
+            entity = BillingEntity.query.get(posted_entity_id) or entity
+        issue_date = header["issue_date"]
+        number_period = service.number_period(selection)
+        owner = billing.number_owner(typed_number, exclude_invoice_id=invoice.id)
+        if owner is not None:
+            offer = (
+                billing.next_free_number(entity, issue_date, typed_number, period=number_period)
+                if entity is not None
+                else billing.unique_number(typed_number, invoice.id)
+            )
+            return _render_step_one(
+                invoice,
+                selection=selection,
+                form=form,
+                number_error=billing.NumberTaken(typed_number, owner, offer),
+                status=409,
+            )
+        if entity is not None:
+            billing.claim_number(entity, typed_number, issue_date, period=number_period)
+        invoice.invoice_number = typed_number
+
+    currency_code = header.pop("currency_code") or invoice.currency_code
+    currency_changed = currency_code != invoice.currency_code
+    selection.currency = currency_code
+    invoice.currency_code = currency_code
+    for name, value in header.items():
+        setattr(invoice, name, value)
+    if billing.module_on() and "billing_entity_id" in form:
+        billing_entity, payment_account, billing_error = billing.resolve_from_form(form, currency_code)
+        if billing_error:
+            db.session.rollback()
+            flash(_(billing_error), "error")
+            return _render_step_one(invoice, selection=selection, form=form, status=400)
+        billing.apply_to_invoice(invoice, billing_entity, payment_account)
+    if bill_to.module_on() and "client_entity_id" in form:
+        bill_to_entity, bill_to_error = bill_to.resolve_from_form(form, invoice.client_id, invoice.client_entity_id)
+        if bill_to_error:
+            db.session.rollback()
+            flash(_(bill_to_error), "error")
+            return _render_step_one(invoice, selection=selection, form=form, status=400)
+        bill_to.apply_to_invoice(invoice, bill_to_entity)
+
+    invoice.project_id = primary.id
+    collected = service.hours_changed(before, selection)
+    try:
+        removed = service.remove_manual_lines(invoice, data.get_ids("remove_line_ids"))
+        if collected:
+            lines = service.recollect(invoice, selection, projects, current_user.id)
+        else:
+            # Same hours: the lines stay; a draft made before step 1 keeps the period it was shown
+            invoice.period_start = selection.period.start
+            invoice.period_end = selection.period.end
+            if currency_changed:
+                # Hours lines name their rate with the currency ("- 40.00 EUR/h"): write them again
+                InvoiceTimeService().apply_template(invoice, invoice.line_template, keep_edited=True)
+            invoice.calculate_totals()
+    except InvoiceTimeError as exc:
+        db.session.rollback()
+        flash(_("Could not add the time entries: %(error)s", error=str(exc)), "error")
+        return _render_step_one(invoice, selection=selection, form=form, status=409)
+    if not safe_commit("edit_step_one", {"invoice_id": invoice.id}):
+        flash(_("Could not update invoice due to a database error. Please check server logs."), "error")
+        return _render_step_one(invoice, selection=selection, form=form, status=500)
+
+    if collected:
+        count = len(lines.items) if lines is not None else 0
+        flash(_("Hours collected again: %(count)s lines", count=count), "success")
+    elif removed:
+        flash(_("Invoice details saved; the hours lines did not change"), "success")
+    else:
+        flash(_("Invoice details saved; the lines did not change"), "success")
+    if removed:
+        flash(ngettext("%(num)d line added by hand removed", "%(num)d lines added by hand removed", removed), "success")
+    return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+
+@invoices_bp.route("/invoices/step-1/summary", methods=["POST"])
+@login_required
+def step_one_summary():
+    """What step 1 shows below the period, for the page's choices (JSON in, JSON with HTML parts out).
+
+    Body: ``client_id`` (or ``invoice_id`` for a draft's step 1), ``period``, ``period_start``,
+    ``period_end``, ``project_ids``, ``projects_touched``, ``client_entries``, ``from_project_id``,
+    ``hours_layout``, ``line_template``, ``currency_code``. Nothing is written.
+    """
+    from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneError
+
+    data = _StepOneInput(request.get_json(silent=True) or {})
+    service = InvoiceStepOneService()
+    invoice = None
+    invoice_id = data.get_int("invoice_id")
+    if invoice_id:
+        invoice = Invoice.query.get_or_404(invoice_id)
+        if not current_user.is_admin and invoice.created_by != current_user.id:
+            return jsonify({"error": "forbidden"}), 403
+        if invoice.status != "draft":
+            return jsonify({"error": "invalid_status"}), 409
+        client = invoice.client
+    else:
+        client = _step_one_client(data.get_int("client_id"))
+        if client is None:
+            return jsonify({"error": "forbidden"}), 403
+    projects = service.client_projects(client, current_user, invoice)
+    try:
+        selection = _step_one_selection(data, client, projects, invoice)
+    except StepOneError as exc:
+        return jsonify({"error": "invalid_period", "message": str(exc)}), 400
+    remove_line_ids = data.get_ids("remove_line_ids")
+    summary = service.summary(selection, projects, remove_line_ids)
+    payload = _step_one_payload(selection, projects, summary, remove_line_ids)
+    if invoice is None:
+        payload["numbers"] = _step_one_numbers(
+            selection, _parse_iso_day(data.get("issue_date")) or selection.period.issue_date()
+        )
+    return jsonify(payload)
+
+
 @invoices_bp.route("/invoices/<int:invoice_id>")
 @login_required
 def view_invoice(invoice_id):
@@ -429,6 +1254,10 @@ def view_invoice(invoice_id):
 
     # Track invoice previewed
     track_invoice_previewed(current_user.id, {"invoice_id": invoice.id, "invoice_number": invoice.invoice_number})
+
+    # A draft opens on its lines and their time entries; ?view=full shows the full page (email, Peppol, …)
+    if invoice.status == "draft" and request.args.get("view") != "full":
+        return render_template("invoices/draft.html", **_draft_page_context(invoice))
 
     # Get email templates for selection
     email_templates = InvoiceTemplate.query.order_by(InvoiceTemplate.name).all()
@@ -584,7 +1413,191 @@ def view_invoice(invoice_id):
         sdi_recipient_ready=sdi_recipient_ready,
         approval=approval,
         link_templates_by_field=link_templates_by_field,
+        **_issue_and_correct_context(invoice),
     )
+
+
+def _hours_text(value):
+    """Hours as the invoice page shows them: 47, 58.5, 0.25."""
+    hours = Decimal(str(value or 0)).quantize(Decimal("0.01")).normalize()
+    return format(hours, "f")
+
+
+def _prepaid_months_text(months):
+    from flask_babel import format_date
+
+    with_year = len({m.year for m in months}) > 1
+    names = []
+    for month in months:
+        try:
+            names.append(format_date(month, "LLLL yyyy" if with_year else "LLLL"))
+        except Exception:
+            names.append(month.strftime("%B %Y" if with_year else "%B"))
+    if len(names) <= 1:
+        return "".join(names)
+    return _("%(first)s and %(last)s", first=", ".join(names[:-1]), last=names[-1])
+
+
+def _billing_texts(summary):
+    """Sentences about what an invoice bills, for the issue and cancel dialogs and the locked notice."""
+    from flask_babel import ngettext
+
+    entries = ngettext("%(num)d time entry", "%(num)d time entries", summary["entries"])
+    expenses = ngettext("%(num)d expense", "%(num)d expenses", summary["expenses"])
+    project_costs = ngettext("%(num)d project cost", "%(num)d project costs", summary["costs"])
+    costs = ngettext("%(num)d cost", "%(num)d costs", summary["costs"])
+    tracked = _hours_text(summary["tracked_hours"])
+    billed = _hours_text(summary["billed_hours"])
+    if summary["entries"]:
+        billed_entries = _(
+            "%(entries)s (%(tracked)s h tracked, %(billed)s h billed)", entries=entries, tracked=tracked, billed=billed
+        )
+    else:
+        billed_entries = entries
+
+    cancel_effect = _(
+        "%(tracked)s h tracked, %(expenses)s and %(costs)s go back to Unbilled",
+        tracked=tracked,
+        expenses=expenses,
+        costs=costs,
+    )
+    prepaid = summary.get("prepaid") or []
+    if prepaid:
+        prepaid_hours = _hours_text(sum((hours for _month, hours in prepaid), Decimal("0")))
+        months = _prepaid_months_text([month for month, _hours in prepaid])
+        if len(prepaid) == 1:
+            prepaid_text = _("%(hours)s h go back to the %(months)s prepaid plan", hours=prepaid_hours, months=months)
+        else:
+            prepaid_text = _("%(hours)s h go back to the %(months)s prepaid plans", hours=prepaid_hours, months=months)
+        cancel_effect = cancel_effect + "; " + prepaid_text
+
+    return {
+        "issue_confirm": _(
+            "Lines and amounts will be locked. %(entries)s, %(expenses)s and %(costs)s will be marked as billed.",
+            entries=entries,
+            expenses=expenses,
+            costs=project_costs,
+        ),
+        "locked": _(
+            "Lines and amounts are locked. %(entries)s, %(expenses)s and %(costs)s are billed on this invoice.",
+            entries=billed_entries,
+            expenses=expenses,
+            costs=project_costs,
+        ),
+        "cancel_effect": cancel_effect + ".",
+    }
+
+
+def _issue_and_correct_context(invoice):
+    """What the invoice page shows about issuing, the locked lines and Cancel and reissue."""
+    from app.services.invoice_correction_service import InvoiceCorrectionService
+    from app.services.invoice_time_service import ISSUED_STATUSES, InvoiceTimeService
+
+    summary = InvoiceTimeService().invoice_summary(invoice)
+    reissue_of = cancellation = None
+    try:
+        if invoice.status == "draft":
+            reissue_of = InvoiceCorrectionService.reissue_of(invoice)
+        elif invoice.status == "cancelled":
+            cancellation = InvoiceCorrectionService.cancellation(invoice)
+    except Exception:
+        # The audit trail may be unavailable (migration pending); the page works without these notes
+        current_app.logger.debug("Invoice correction notes unavailable for %s", invoice.id, exc_info=True)
+        db.session.rollback()
+    return {
+        "billing_summary": summary,
+        "billing_texts": _billing_texts(summary),
+        "lines_locked": invoice.status in ISSUED_STATUSES,
+        "can_correct": InvoiceCorrectionService.can_correct(invoice),
+        "has_payments": InvoiceCorrectionService.can_correct(invoice)
+        and InvoiceCorrectionService.has_payments(invoice),
+        "reissue_of": reissue_of,
+        "cancellation": cancellation,
+    }
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/correct", methods=["POST"])
+@login_required
+def correct_invoice(invoice_id):
+    """Cancel an issued invoice with a reason, and optionally reissue it as a new draft."""
+    from app.services.invoice_correction_service import (
+        CancelReasonRequiredError,
+        InvoiceCorrectionError,
+        InvoiceCorrectionService,
+        InvoiceHasPaymentsError,
+    )
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if not current_user.is_admin and invoice.created_by != current_user.id:
+        flash(_("You do not have permission to change this invoice"), "error")
+        return redirect(url_for("invoices.list_invoices"))
+
+    action = (request.form.get("action") or "reissue").strip()
+    if action not in ("reissue", "cancel"):
+        flash(_("Invalid action"), "error")
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+    previous_status = invoice.status
+    cancel_effect = _billing_texts(InvoiceTimeService().invoice_summary(invoice))["cancel_effect"]
+    service = InvoiceCorrectionService()
+    draft = None
+    try:
+        if action == "reissue":
+            draft = service.reissue(invoice, request.form.get("reason"), current_user.id)
+        else:
+            service.cancel(invoice, request.form.get("reason"), current_user.id)
+    except CancelReasonRequiredError:
+        db.session.rollback()
+        flash(_("Enter a reason to cancel the invoice."), "error")
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+    except InvoiceHasPaymentsError:
+        db.session.rollback()
+        flash(_("This invoice has payments; use a credit note"), "error")
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+    except (InvoiceCorrectionError, InvoiceTimeError) as exc:
+        db.session.rollback()
+        flash(_("Could not cancel the invoice: %(error)s", error=str(exc)), "error")
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+    if not safe_commit("correct_invoice", {"invoice_id": invoice.id, "action": action}):
+        flash(_("Could not cancel the invoice due to a database error. Please check server logs."), "error")
+        return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+    try:
+        from app.constants import WebhookEvent
+        from app.utils.invoice_events import emit_invoice_event
+
+        emit_invoice_event(
+            WebhookEvent.INVOICE_UPDATED.value, invoice, previous_status=previous_status, new_status="cancelled"
+        )
+        if draft is not None:
+            emit_invoice_event(WebhookEvent.INVOICE_CREATED.value, draft)
+    except Exception:
+        current_app.logger.debug("Failed to emit invoice correction webhooks for %s", invoice.id, exc_info=True)
+    try:
+        log_event(
+            "invoice.status_changed",
+            user_id=current_user.id,
+            invoice_id=invoice.id,
+            previous_status=previous_status,
+            new_status="cancelled",
+        )
+    except Exception:
+        current_app.logger.warning("Failed to log invoice.status_changed for invoice %s", invoice.id, exc_info=True)
+
+    if draft is not None:
+        flash(
+            _(
+                "Invoice %(old)s cancelled. Its lines are on the new draft %(new)s.",
+                old=invoice.invoice_number,
+                new=draft.invoice_number,
+            ),
+            "success",
+        )
+        return redirect(url_for("invoices.view_invoice", invoice_id=draft.id))
+    flash(_("Invoice %(number)s cancelled: %(effect)s", number=invoice.invoice_number, effect=cancel_effect), "success")
+    return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
 
 
 @invoices_bp.route("/invoices/<int:invoice_id>/edit", methods=["GET", "POST"])
@@ -720,9 +1733,12 @@ def edit_invoice(invoice_id):
             flash(_("Could not save the invoice: %(error)s", error=str(exc)), "error")
             return redirect(url_for("invoices.edit_invoice", invoice_id=invoice.id))
 
+        # A time line whose description, quantity or price changes is marked as edited by hand
+        previous_lines = time_links.snapshot_lines(invoice)
         previous_hours = time_links.detach_lines(invoice)
         invoice.items.delete()
         new_items = []
+        new_item_ids = []
 
         # Add new items
         for i in range(len(descriptions)):
@@ -731,24 +1747,12 @@ def edit_invoice(invoice_id):
                     quantity = Decimal(quantities[i])
                     unit_price = Decimal(unit_prices[i])
 
-                    # Get time entry ids if provided (for time-based items)
+                    # Get time entry ids if provided (for time-based items). The quantity of a time line
+                    # follows its linked hours unless it was changed by hand (see carry_line_state).
                     time_entry_ids_val = None
+                    row_item_id = item_ids[i] if i < len(item_ids) else None
                     if i < len(item_time_entry_ids_list) and item_time_entry_ids_list[i].strip():
                         time_entry_ids_val = item_time_entry_ids_list[i].strip()
-                        # Recalculate quantity from time entries (defense in depth)
-                        try:
-                            entry_ids = [int(x.strip()) for x in time_entry_ids_val.split(",") if x.strip()]
-                            if entry_ids:
-                                entries = TimeEntry.query.filter(TimeEntry.id.in_(entry_ids)).all()
-                                total_seconds = sum(e.duration_seconds or 0 for e in entries)
-                                quantity = Decimal(str(round(total_seconds / 3600, 2)))
-                        except (ValueError, TypeError):
-                            # Malformed time_entry_ids CSV — keep submitted quantity.
-                            current_app.logger.debug(
-                                "Could not recalculate quantity from time_entry_ids %r",
-                                time_entry_ids_val,
-                                exc_info=True,
-                            )
 
                     # Get stock item info if provided
                     stock_item_id = request.form.getlist("item_stock_item_id[]")
@@ -802,7 +1806,7 @@ def edit_invoice(invoice_id):
 
                     item = InvoiceItem(
                         invoice_id=invoice.id,
-                        description=descriptions[i].strip(),
+                        description=time_links.normalize_description(descriptions[i]),
                         quantity=quantity,
                         unit_price=unit_price,
                         time_entry_ids=time_entry_ids_val,
@@ -816,6 +1820,7 @@ def edit_invoice(invoice_id):
                     )
                     db.session.add(item)
                     new_items.append(item)
+                    new_item_ids.append(row_item_id)
                 except ValueError:
                     flash(f"Invalid quantity or price for item {i+1}", "error")
                     continue
@@ -826,6 +1831,11 @@ def edit_invoice(invoice_id):
             db.session.rollback()
             flash(_("Could not save the invoice: %(error)s", error=str(exc)), "error")
             return redirect(url_for("invoices.edit_invoice", invoice_id=invoice.id))
+        for item, row_item_id in zip(new_items, new_item_ids):
+            time_links.carry_line_state(previous_lines, item, row_item_id)
+        # Entries no line keeps any more give back the prepaid hours they used on this draft
+        if time_links.release_dropped_prepaid(invoice, previous_hours.keys()):
+            flash(_(PREPAID_FREED_WARNING), "warning")
 
         # Update expenses (only when the expenses section was submitted)
         if request.form.get("expenses_sync"):
@@ -1019,147 +2029,25 @@ def update_invoice_status(invoice_id):
     if not current_user.is_admin and invoice.created_by != current_user.id:
         return jsonify({"error": "Permission denied"}), 403
 
-    previous_status = invoice.status
     new_status = request.form.get("new_status")
     if new_status not in ["draft", "issued", "sent", "paid", "overdue", "cancelled", "void"]:
         return jsonify({"error": "Invalid status"}), 400
 
-    # Normalize legacy naming: treat "void" and "cancelled" as the same terminal state.
-    if new_status == "void":
-        new_status = "cancelled"
+    from app.services import InvoiceService
 
-    # State machine enforcement (production-grade invariants); the bulk status change uses the same table
-    from app.services.invoice_time_service import status_change_allowed
+    result = InvoiceService().transition_status(invoice, new_status, actor_id=current_user.id)
+    if not result.get("success"):
+        return jsonify({"error": result.get("message") or "Invalid status transition"}), 400
 
-    prev = previous_status or "draft"
-    if new_status == prev:
-        return jsonify({"success": True, "status": new_status})
-    if not status_change_allowed(prev, new_status):
-        return jsonify({"error": "Invalid status transition"}), 400
-
-    # Once sent/paid/cancelled, the invoice should be treated as immutable (no reverting).
-    if prev in {"sent", "paid", "overdue", "cancelled"} and new_status in {"draft", "issued"}:
-        return jsonify({"error": "Cannot revert finalized invoice"}), 400
-
-    invoice.status = new_status
-
-    # A cancelled invoice lets go of its time entries, costs and expenses
-    from app.services.invoice_time_service import InvoiceTimeService
-
-    InvoiceTimeService().on_status_change(invoice, previous_status)
-
-    # Auto-update payment status if marking as paid
-    if new_status == "paid" and invoice.payment_status != "fully_paid":
-        invoice.amount_paid = invoice.total_amount
-        invoice.payment_status = "fully_paid"
-        if not invoice.payment_date:
-            invoice.payment_date = datetime.utcnow().date()
-
-    # Mark time entries as paid when invoice is sent (non-external invoices)
-    if new_status == "sent":
-        from app.services import InvoiceService
-
-        invoice_service = InvoiceService()
-        marked_count = invoice_service.mark_time_entries_as_paid(invoice)
-        if marked_count > 0:
-            current_app.logger.info(
-                f"Marked {marked_count} time entr{'y' if marked_count == 1 else 'ies'} as paid for invoice {invoice.invoice_number}"
-            )
-
-    # Reduce stock when invoice is sent or paid (if configured)
-    import os
-
-    from app.models import StockMovement, StockReservation
-
-    reduce_on_sent = os.getenv("INVENTORY_REDUCE_ON_INVOICE_SENT", "true").lower() == "true"
-    reduce_on_paid = os.getenv("INVENTORY_REDUCE_ON_INVOICE_PAID", "false").lower() == "true"
-
-    should_reduce_stock = (new_status == "sent" and reduce_on_sent and previous_status != "sent") or (
-        new_status == "paid" and reduce_on_paid and previous_status != "paid"
-    )
-    if should_reduce_stock:
-        for item in invoice.items:
-            if item.is_stock_item and item.stock_item_id and item.warehouse_id:
-                try:
-                    # Fulfill any existing reservations
-                    reservation = StockReservation.query.filter_by(
-                        stock_item_id=item.stock_item_id,
-                        warehouse_id=item.warehouse_id,
-                        reservation_type="invoice",
-                        reservation_id=invoice.id,
-                        status="reserved",
-                    ).first()
-
-                    if reservation:
-                        reservation.fulfill()
-
-                    # Create stock movement (sale)
-                    StockMovement.record_movement(
-                        movement_type="sale",
-                        stock_item_id=item.stock_item_id,
-                        warehouse_id=item.warehouse_id,
-                        quantity=-item.quantity,  # Negative for removal
-                        moved_by=current_user.id,
-                        reference_type="invoice",
-                        reference_id=invoice.id,
-                        unit_cost=item.stock_item.default_cost if item.stock_item else None,
-                        reason=f"Invoice {invoice.invoice_number}",
-                        update_stock=True,
-                    )
-                except Exception as e:
-                    flash(
-                        _(
-                            "Warning: Could not reduce stock for item %(item)s: %(error)s",
-                            item=item.description,
-                            error=str(e),
-                        ),
-                        "warning",
-                    )
-
-        # Also deplete stock linked from ExtraGoods on this invoice
-        for good in invoice.extra_goods:
-            if not getattr(good, "stock_item_id", None):
-                continue
-            try:
-                from app.models import Warehouse, WarehouseStock
-
-                warehouse_id = None
-                # Prefer first active warehouse with available stock for this item
-                stock_row = (
-                    WarehouseStock.query.filter_by(stock_item_id=good.stock_item_id)
-                    .join(Warehouse)
-                    .filter(Warehouse.is_active == True)  # noqa: E712
-                    .order_by(WarehouseStock.quantity_on_hand.desc())
-                    .first()
-                )
-                if stock_row:
-                    warehouse_id = stock_row.warehouse_id
-                else:
-                    first_wh = Warehouse.query.filter_by(is_active=True).first()
-                    warehouse_id = first_wh.id if first_wh else None
-                if not warehouse_id:
-                    continue
-                StockMovement.record_movement(
-                    movement_type="sale",
-                    stock_item_id=good.stock_item_id,
-                    warehouse_id=warehouse_id,
-                    quantity=-Decimal(str(good.quantity or 0)),
-                    moved_by=current_user.id,
-                    reference_type="invoice_extra_good",
-                    reference_id=invoice.id,
-                    unit_cost=good.stock_item.default_cost if good.stock_item else None,
-                    reason=f"Invoice {invoice.invoice_number} extra good: {good.name}",
-                    update_stock=True,
-                )
-            except Exception as e:
-                flash(
-                    _(
-                        "Warning: Could not reduce stock for extra good %(item)s: %(error)s",
-                        item=good.name,
-                        error=str(e),
-                    ),
-                    "warning",
-                )
+    previous_status = result.get("previous_status")
+    new_status = result.get("status") or new_status
+    marked_count = result.get("marked_count") or 0
+    if marked_count > 0:
+        current_app.logger.info(
+            f"Marked {marked_count} time entr{'y' if marked_count == 1 else 'ies'} as paid for invoice {invoice.invoice_number}"
+        )
+    for warning in result.get("warnings") or []:
+        flash(_("Warning: %(msg)s", msg=warning), "warning")
 
     if not safe_commit("update_invoice_status", {"invoice_id": invoice.id, "status": new_status}):
         return jsonify({"error": "Database error while updating status"}), 500
@@ -1331,11 +2219,13 @@ def bulk_update_status():
         flash(_("Invalid status value"), "error")
         return _back_to_invoice_list()
 
-    from app.services.invoice_time_service import InvoiceTimeService, status_change_allowed
+    from app.services import InvoiceService
 
+    invoice_service = InvoiceService()
     updated_count = 0
     skipped_count = 0
     not_allowed_count = 0
+    has_payments_count = 0
 
     for invoice_id_str in invoice_ids:
         try:
@@ -1350,25 +2240,24 @@ def bulk_update_status():
                 skipped_count += 1
                 continue
 
-            # Same transitions as a single status change: a cancelled or paid invoice stays as it is
-            previous_status = invoice.status
-            if not status_change_allowed(previous_status, new_status):
-                not_allowed_count += 1
+            result = invoice_service.transition_status(
+                invoice,
+                new_status,
+                actor_id=current_user.id,
+                payment_reference=invoice_reference or None,
+            )
+            if not result.get("success"):
+                if result.get("error") == "has_payments":
+                    has_payments_count += 1
+                else:
+                    not_allowed_count += 1
                 continue
-            invoice.status = new_status
-            InvoiceTimeService().on_status_change(invoice, previous_status)
 
-            # Auto-update payment status if marking as paid
-            if new_status == "paid" and invoice.payment_status != "fully_paid":
-                invoice.amount_paid = invoice.total_amount
-                invoice.payment_status = "fully_paid"
-                if not invoice.payment_date:
-                    invoice.payment_date = datetime.utcnow().date()
-                # Set invoice reference if provided
-                if invoice_reference:
-                    invoice.payment_reference = invoice_reference
-
-            updated_count += 1
+            # Same-status is a no-op success; only count real changes
+            if result.get("previous_status") != result.get("status"):
+                updated_count += 1
+            for warning in result.get("warnings") or []:
+                flash(_("Warning: %(msg)s", msg=warning), "warning")
 
         except Exception:
             current_app.logger.warning("Skipping invoice %s during bulk status update", invoice_id_str, exc_info=True)
@@ -1397,6 +2286,15 @@ def bulk_update_status():
                 "(a cancelled or paid invoice keeps its status)",
                 count=not_allowed_count,
                 status=new_status,
+            ),
+            "warning",
+        )
+    if has_payments_count > 0:
+        flash(
+            _(
+                "Skipped %(count)d invoice(s) with payments: use Correct → Credit note, "
+                "or remove the payments first",
+                count=has_payments_count,
             ),
             "warning",
         )
@@ -1440,9 +2338,20 @@ def generate_from_time(invoice_id):
 
         # The picker hides what is already on this invoice, so keep it: manual and cost
         # lines stay, and time lines are rebuilt from their entries plus the new selection.
+        # A time line edited by hand (description, quantity or price) stays as it is, with its entries.
         from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+        from app.utils.invoice_time_entry_items import LAYOUT_NONE, normalize_template, resolve_hours_layout_from_form
 
         time_links = InvoiceTimeService()
+        hours_layout = resolve_hours_layout_from_form(request.form)
+        line_template = normalize_template(request.form.get("line_template"))
+        if hours_layout == LAYOUT_NONE:
+            # "Don't add any hours": the invoice's hours stay as they are. The project's default is not
+            # changed (it stays the last layout that added hours).
+            selected_entries = []
+            if not any(item.kind == "time" for item in invoice.items.all()):
+                invoice.hours_layout = LAYOUT_NONE
+                invoice.line_template = None
         entry_ids = set()
         for raw_id in selected_entries:
             try:
@@ -1450,20 +2359,24 @@ def generate_from_time(invoice_id):
             except (TypeError, ValueError):
                 continue
         eligible_ids = set()
+        kept_entry_ids = set()
         if selected_entries:
             # Same set the picker offers, decided before this invoice's own links are dropped:
             # running entries and entries marked paid outside an invoice are not taken
             eligible_ids = time_links.eligible_entry_ids(
                 invoice, entry_ids | set(time_links.invoice_entry_ids(invoice)), include_prepaid_only=True
             )
+            active_links = invoice.time_links.filter_by(released_at=None).all()
+            kept_line_ids = {item.id for item in invoice.items.all() if item.kind == "time" and item.is_edited}
+            kept_entry_ids = {link.time_entry_id for link in active_links if link.invoice_item_id in kept_line_ids}
             # Entries this invoice already bills, including those fully covered by prepaid hours,
             # which have no line
-            line_ids = {
-                link.invoice_item_id
-                for link in invoice.time_links.filter_by(released_at=None).all()
-                if link.invoice_item_id
-            }
-            entry_ids.update(time_links.unlink_invoice(invoice))
+            line_ids = {link.invoice_item_id for link in active_links if link.invoice_item_id} - kept_line_ids
+            for link in active_links:
+                if link.time_entry_id not in kept_entry_ids:
+                    entry_ids.add(link.time_entry_id)
+                    db.session.delete(link)
+            db.session.flush()
             for item in invoice.items.all():
                 if item.id in line_ids:
                     db.session.delete(item)
@@ -1474,10 +2387,7 @@ def generate_from_time(invoice_id):
 
         # Process time entries
         if selected_entries:
-            from app.models import Settings
-            from app.utils.invoice_time_entry_items import build_time_entry_lines, resolve_group_time_entries_from_form
-
-            time_entries = TimeEntry.query.filter(TimeEntry.id.in_(entry_ids)).all()
+            time_entries = TimeEntry.query.filter(TimeEntry.id.in_(entry_ids - kept_entry_ids)).all()
             conflicts = time_links.find_conflicts(time_entries, invoice)
             if conflicts:
                 db.session.rollback()
@@ -1504,33 +2414,19 @@ def generate_from_time(invoice_id):
                 )
                 time_entries = [entry for entry in time_entries if entry.id in eligible_ids]
 
-            prepaid_allocator = PrepaidHoursAllocator(client=invoice.client, invoice=invoice)
+            # Entries of kept (edited) lines stay out of the prepaid allocation: their ledger rows and
+            # link hours are left as they are, and the hours they used count as used
+            prepaid_allocator = PrepaidHoursAllocator(
+                client=invoice.client, invoice=invoice, keep_entry_ids=kept_entry_ids
+            )
             processed_entries = prepaid_allocator.process(time_entries)
             total_prepaid_allocated = prepaid_allocator.total_prepaid_hours_assigned
 
-            settings = Settings.get_settings()
-            default_group = getattr(settings, "invoice_group_time_entries", True) if settings else True
-            group_entries = resolve_group_time_entries_from_form(
-                request.form.get("per_entry_lines") == "on",
-                default_group,
-            )
-            lines = build_time_entry_lines(
-                invoice.id,
-                processed_entries,
-                group=group_entries,
-                project_name=invoice.project.name if invoice.project else None,
-            )
-            for item in lines.items:
-                db.session.add(item)
-            missing_rate_warnings = lines.missing_rates
-            db.session.flush()
             try:
-                time_links.link_items(
-                    invoice,
-                    lines.items,
-                    hours_by_entry={p.entry.id: p.billable_hours for p in processed_entries},
-                    created_by=current_user.id,
+                lines = time_links.add_entries(
+                    invoice, processed_entries, hours_layout, line_template, created_by=current_user.id
                 )
+                missing_rate_warnings = lines.missing_rates
                 # Entries fully covered by prepaid hours get no line, only a link to the invoice
                 time_links.link_entries(
                     invoice,
@@ -1637,10 +2533,19 @@ def generate_from_time(invoice_id):
 
     # GET request - show time entry and cost selection
     from app.services import InvoiceService
+    from app.services.invoice_time_service import InvoiceTimeService
+    from app.utils.invoice_time_entry_items import DEFAULT_LINE_TEMPLATES, HOURS_LAYOUT_LABELS, HOURS_LAYOUTS
 
     data = InvoiceService().get_unbilled_data_for_invoice(invoice)
     focus = request.args.get("focus", "").strip()
     resolved_hourly_rate = RateOverride.resolve_rate(invoice.project)
+    # The invoice's own layout once it has hours, else the project's last one, else the global setting
+    own_layout = invoice.hours_layout if invoice.hours_layout not in (None, "none") else None
+    hours_layout, line_template = InvoiceTimeService().resolve_layout(
+        invoice.project,
+        own_layout,
+        invoice.line_template if own_layout else None,
+    )
     return render_template(
         "invoices/generate_from_time.html",
         invoice=invoice,
@@ -1659,9 +2564,58 @@ def generate_from_time(invoice_id):
         prepaid_reset_day=data.get("prepaid_reset_day"),
         focus=focus,
         diagnostics=data.get("diagnostics", {}),
-        invoice_group_time_entries=data.get("invoice_group_time_entries", True),
         resolved_hourly_rate=resolved_hourly_rate,
+        hours_layouts=[(layout, HOURS_LAYOUT_LABELS[layout]) for layout in HOURS_LAYOUTS],
+        default_line_templates=DEFAULT_LINE_TEMPLATES,
+        hours_layout=hours_layout,
+        line_template=line_template,
     )
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/hours-layout-preview", methods=["POST"])
+@login_required
+def hours_layout_preview(invoice_id):
+    """Example line for each hours layout, from the time entries selected on generate-from-time.
+
+    JSON body: ``time_entry_ids`` and ``line_template`` (omit it to use each layout's default).
+    Only entries the picker offers are used (unbilled entries of the invoice's project); a user limited
+    to assigned clients gets nothing for a project outside them. Prepaid hours are not applied.
+    """
+    from app.services.invoice_time_service import InvoiceTimeService
+    from app.utils.invoice_time_entry_items import layout_examples, normalize_template
+    from app.utils.scope_filter import user_can_access_project
+
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if not current_user.is_admin and invoice.created_by != current_user.id:
+        return jsonify({"error": "forbidden"}), 403
+    # A user limited to assigned clients (subcontractor) sees nothing outside them
+    if getattr(current_user, "is_scope_restricted", False) and not user_can_access_project(
+        current_user, invoice.project_id
+    ):
+        return jsonify({"error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get("time_entry_ids") or []
+    ids = []
+    for raw in raw_ids if isinstance(raw_ids, list) else []:
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    # Same set as the picker: unbilled entries of the invoice's project
+    entries = (
+        InvoiceTimeService().unbilled_query([invoice.project_id]).filter(TimeEntry.id.in_(ids[:1000])).all()
+        if ids
+        else []
+    )
+    template = data.get("line_template")
+    examples = layout_examples(
+        entries,
+        template=normalize_template(template if isinstance(template, str) else None),
+        currency=invoice.currency_code,
+        project_name=invoice.project.name if invoice.project else None,
+    )
+    return jsonify({"entry_count": len(entries), "layouts": examples})
 
 
 @invoices_bp.route("/invoices/<int:invoice_id>/export/csv")
@@ -2733,3 +3687,641 @@ def peppol_inbox_poll_now():
         current_app.logger.exception("Manual Peppol inbox poll failed")
         flash(_("Failed to poll Peppol inbox."), "error")
     return redirect(url_for("invoices.peppol_inbox"))
+
+
+# ----------------------------------------------------------------------
+# Draft page: the lines with their time entries, and the actions on them
+# ----------------------------------------------------------------------
+DRAFT_ADDED_HOURS_KEY = "invoice_draft_added_hours"
+
+
+def _money_text(value):
+    return "%.2f" % Decimal(str(value or 0))
+
+
+def _step_one_url(invoice):
+    """Link to step 1 of the invoice, when this version of the app has it."""
+    if "invoices.edit_step_one" not in current_app.view_functions:
+        return None
+    return url_for("invoices.edit_step_one", invoice_id=invoice.id)
+
+
+def _draft_entry_rows(row, rate_by_entry):
+    item = row["item"]
+    rows = []
+    for link, entry in row["entries"]:
+        from app.utils.invoice_time_entry_items import round_quantity
+
+        hours = round_quantity(Decimal(link.hours or 0))
+        rate = rate_by_entry.get(entry.id, Decimal(str(item.unit_price or 0)))
+        rows.append(
+            {
+                "entry": entry,
+                "date": entry.start_time.date() if entry.start_time else None,
+                "person": entry.user.display_name if entry.user else "",
+                "task": entry.task.name if entry.task_id and entry.task else "",
+                "notes": entry.notes or "",
+                "hours": hours,
+                "rate": rate,
+                "amount": (hours * rate).quantize(Decimal("0.01")),
+            }
+        )
+    return rows
+
+
+def _draft_line_view(row, added_hours, rate_by_entry):
+    """What the draft page shows for one line."""
+    from app.services.invoice_time_service import LINE_KIND_MANUAL_HOURS, LINE_KIND_TIME
+
+    item = row["item"]
+    tracked = row["tracked"]
+    view = {
+        "item": item,
+        "kind": row["kind"],
+        "is_time": row["kind"] == LINE_KIND_TIME,
+        "is_manual_hours": row["kind"] == LINE_KIND_MANUAL_HOURS,
+        "entries": _draft_entry_rows(row, rate_by_entry),
+        "entry_count": len(row["entries"]),
+        "tracked": tracked,
+        "tracked_text": _hours_text(tracked),
+        "quantity_note": "",
+        "price_note": "",
+        "added_text": None,
+    }
+    if view["is_time"]:
+        if item.quantity_edited:
+            view["quantity_note"] = _("edited · %(hours)s h tracked", hours=_hours_text(tracked))
+        else:
+            view["quantity_note"] = _("= tracked")
+        view["price_note"] = _("edited") if item.price_edited else _("entries' rate")
+        if added_hours:
+            view["added_text"] = _("+%(hours)s h tracked", hours=_hours_text(added_hours))
+    elif view["is_manual_hours"]:
+        view["quantity_note"] = _("added by hand")
+    return view
+
+
+def _draft_page_context(invoice):
+    """Everything the draft page shows, read in a few queries."""
+    from flask import session
+
+    from app.services.invoice_time_service import HOURS_LINE_KINDS, LINE_KIND_TIME, InvoiceTimeService
+    from app.utils.billing_entities import seller_settings_for
+    from app.utils.client_entities import buyer_lines
+    from app.utils.invoice_time_entry_items import (
+        DEFAULT_LINE_TEMPLATES,
+        HOURS_LAYOUT_LABELS,
+        LAYOUT_NONE,
+        default_line_template,
+        normalize_layout,
+        resolve_entry_rate,
+    )
+
+    service = InvoiceTimeService()
+    settings = Settings.get_settings()
+    rows = service.draft_lines(invoice)
+
+    added = {}
+    try:
+        added = {int(k): Decimal(str(v)) for k, v in (session.pop(DRAFT_ADDED_HOURS_KEY, None) or {}).items()}
+    except (TypeError, ValueError, ArithmeticError):
+        added = {}
+
+    # Entry rates are the line's price, except on a line whose price was changed by hand
+    rate_by_entry = {}
+    for row in rows:
+        if row["item"].price_edited:
+            for _link, entry in row["entries"]:
+                rate_by_entry[entry.id] = resolve_entry_rate(entry).rate
+
+    hours_lines, other_lines = [], []
+    for row in rows:
+        view = _draft_line_view(row, added.get(row["item"].id), rate_by_entry)
+        (hours_lines if row["kind"] in HOURS_LINE_KINDS else other_lines).append(view)
+
+    hours_total = sum((Decimal(str(v["item"].total_amount or 0)) for v in hours_lines), Decimal("0"))
+    hours_billed = sum((Decimal(str(v["item"].quantity or 0)) for v in hours_lines), Decimal("0"))
+    other_total = sum((Decimal(str(v["item"].total_amount or 0)) for v in other_lines), Decimal("0"))
+    goods = invoice.extra_goods.all()
+    goods_total = sum((Decimal(str(g.total_amount or 0)) for g in goods), Decimal("0"))
+    expenses = invoice.expenses.all()
+    expenses_total = sum((Decimal(str(e.total_amount or 0)) for e in expenses), Decimal("0"))
+    costs_count = ProjectCost.query.filter(ProjectCost.invoice_id == invoice.id).count()
+    edited_lines = [v["item"] for v in hours_lines if v["is_time"] and v["item"].is_edited]
+
+    layout = normalize_layout(invoice.hours_layout)
+    if layout in (None, LAYOUT_NONE):
+        layout = service._invoice_layout(invoice)
+    template = invoice.line_template or default_line_template(layout)
+
+    allowed_projects = _user_project_ids()
+    new_entries = service.new_period_entries(invoice, allowed_projects)
+    new_hours = sum((Decimal(str(e.duration_seconds or 0)) / Decimal(3600) for e in new_entries), Decimal("0"))
+    running = service.running_period_entries(invoice, allowed_projects)
+    zero_rate_lines = [v["item"] for v in hours_lines + other_lines if Decimal(str(v["item"].unit_price or 0)) == 0]
+
+    seller = seller_settings_for(invoice, settings)
+    pay_to = invoice.payment_details_text or getattr(seller, "payment_text", None)
+    if not pay_to and seller is settings:
+        pay_to = getattr(settings, "company_bank_info", None) or ""
+
+    issue_context = _issue_and_correct_context(invoice)
+    summary = issue_context["billing_summary"]
+
+    discount = Decimal(str(invoice.discount_amount or 0))
+    discount_percent = Decimal(str(invoice.discount_percent or 0))
+    if not discount and discount_percent:
+        base = hours_total + other_total + goods_total + expenses_total
+        discount = (base * discount_percent / 100).quantize(Decimal("0.01"))
+
+    return {
+        "invoice": invoice,
+        "seller": seller,
+        "pay_to": pay_to,
+        "buyer_lines": buyer_lines(invoice),
+        "hours_lines": hours_lines,
+        "other_lines": other_lines,
+        "goods": goods,
+        "expenses": expenses,
+        "expenses_total": expenses_total,
+        "costs_count": costs_count,
+        "hours_total": hours_total,
+        "hours_billed": hours_billed,
+        "hours_billed_text": _hours_text(hours_billed),
+        "other_total": other_total + goods_total,
+        "line_count": len(rows) + len(goods),
+        "edited_lines": edited_lines,
+        "hours_layout": layout,
+        "hours_layouts": [(key, label) for key, label in HOURS_LAYOUT_LABELS.items() if key != LAYOUT_NONE],
+        "default_templates": DEFAULT_LINE_TEMPLATES,
+        "line_template": template,
+        "has_time_lines": any(v["kind"] == LINE_KIND_TIME for v in hours_lines),
+        "new_entries": new_entries,
+        "new_hours_text": _hours_text(new_hours),
+        "running_entries": running,
+        "zero_rate_lines": zero_rate_lines,
+        "tracked_text": _hours_text(summary["tracked_hours"]),
+        "step_one_url": _step_one_url(invoice),
+        "default_hours_rate": service.default_hours_rate(invoice),
+        "discount_value": discount,
+        "issue_confirm": issue_context["billing_texts"]["issue_confirm"],
+        "reissue_of": issue_context["reissue_of"],
+        "vat_categories": ("S", "Z", "E", "AE", "K", "G", "O", "L", "M"),
+        "money": _money_text,
+    }
+
+
+def _wants_json():
+    return (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or request.accept_mimetypes.best == "application/json"
+    )
+
+
+def _draft_totals(invoice):
+    return {
+        "subtotal": _money_text(invoice.subtotal),
+        "tax": _money_text(invoice.tax_amount),
+        "total": _money_text(invoice.total_amount),
+        "currency": invoice.currency_code,
+    }
+
+
+PREPAID_FREED_WARNING = "Prepaid hours were freed. Rebuild from step 1 to apply them."
+
+
+def _user_project_ids():
+    """Projects the current user may see (None: all), for the new entries of a draft's period."""
+    from app.utils.scope_filter import get_allowed_project_ids
+
+    return get_allowed_project_ids(current_user)
+
+
+def _draft_done(invoice, message, *, data=None, anchor=None, reload=True, warnings=None):
+    """Answer a draft action: JSON for the page, a redirect back to the draft without JavaScript.
+
+    ``warnings`` go in the JSON answer, for the page to show at once; without JavaScript they are flashed.
+    """
+    warnings = [str(w) for w in (warnings or []) if w]
+    if _wants_json():
+        payload = {
+            "success": True,
+            "message": message,
+            "reload": reload,
+            "warnings": warnings,
+            "totals": _draft_totals(invoice),
+        }
+        payload.update(data or {})
+        return jsonify(payload)
+    if message:
+        flash(message, "success")
+    for warning in warnings:
+        flash(warning, "warning")
+    url = url_for("invoices.view_invoice", invoice_id=invoice.id)
+    return redirect(url + (f"#{anchor}" if anchor else ""))
+
+
+def _draft_failed(invoice_id, message, status=400, code="invalid"):
+    if _wants_json():
+        return jsonify({"success": False, "error": code, "message": message}), status
+    flash(message, "error")
+    if status == 403:
+        return redirect(url_for("invoices.list_invoices"))
+    return redirect(url_for("invoices.view_invoice", invoice_id=invoice_id))
+
+
+def _draft_for_action(invoice_id):
+    """The draft an action changes, or the refusal: not found, no permission, not a draft."""
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if not current_user.is_admin and invoice.created_by != current_user.id:
+        return None, _draft_failed(invoice_id, _("You do not have permission to edit this invoice"), 403, "forbidden")
+    if invoice.status != "draft":
+        return None, _draft_failed(
+            invoice_id,
+            _(
+                "Invoice %(number)s is %(status)s: only a draft can be changed.",
+                number=invoice.invoice_number,
+                status=invoice.status,
+            ),
+            400,
+            "invalid_status",
+        )
+    return invoice, None
+
+
+def _draft_line(invoice, item_id):
+    item = InvoiceItem.query.filter_by(id=item_id, invoice_id=invoice.id).first()
+    if item is None:
+        abort(404)
+    return item
+
+
+def _draft_commit(invoice, action):
+    if not safe_commit(f"invoice_draft_{action}", {"invoice_id": invoice.id}):
+        return _draft_failed(invoice.id, _("Could not save the invoice due to a database error."), 500, "db_error")
+    return None
+
+
+# What a draft action says when a value cannot be used: by form field and by problem.
+# The answer is built from these texts only; the exception's own text goes to the log.
+DRAFT_FIELD_LABELS = {
+    "description": "Description",
+    "quantity": "Quantity",
+    "unit_price": "Unit price",
+    "tax_rate": "Line VAT rate",
+    "vat_category": "VAT category",
+    "discount_percent": "Line discount",
+    "discount_amount": "Line discount amount",
+    "position": "Position",
+    "discount": "Discount",
+}
+DRAFT_VALUE_PROBLEMS = {
+    "required": "%(field)s is required.",
+    "not_a_number": "%(field)s must be a number.",
+    "too_low": "%(field)s cannot be below 0.",
+    "too_high": "%(field)s cannot be above 100%%.",
+    "unknown": "%(field)s is not one of the allowed values.",
+}
+
+
+def _draft_error_answer(exc):
+    """The error code and message a draft action answers with, from fixed texts only."""
+    from app.services.invoice_time_service import (
+        EntryNotOnLineError,
+        InvalidHoursLayoutError,
+        InvalidLineValueError,
+        InvoiceNotDraftError,
+        TimeEntryAlreadyInvoicedError,
+    )
+
+    if isinstance(exc, EntryNotOnLineError):
+        return "not_on_line", _("This time entry is not on this line.")
+    if isinstance(exc, InvoiceNotDraftError):
+        return "invalid_status", _("Only a draft can be changed.")
+    if isinstance(exc, InvalidHoursLayoutError):
+        return "invalid_hours_layout", _("Choose how to show the hours.")
+    if isinstance(exc, TimeEntryAlreadyInvoicedError):
+        return "already_invoiced", _("A time entry is already on another invoice.")
+    if isinstance(exc, InvalidLineValueError):
+        for field, label in DRAFT_FIELD_LABELS.items():
+            if exc.field != field:
+                continue
+            for problem, text in DRAFT_VALUE_PROBLEMS.items():
+                if exc.problem == problem:
+                    return "invalid_value", _(text, field=_(label))
+        return "invalid_value", _("A value is not valid.")
+    return "invalid", _("This change could not be made to the draft.")
+
+
+def _draft_error(invoice, exc):
+    db.session.rollback()
+    current_app.logger.info("Draft action refused on invoice %s: %s", invoice.id, exc)
+    code, message = _draft_error_answer(exc)
+    return _draft_failed(invoice.id, message, 400, code)
+
+
+def _remove_entry_action(invoice_id, item_id, entry_id, non_billable):
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    item = _draft_line(invoice, item_id)
+    entry = TimeEntry.query.get_or_404(entry_id)
+    try:
+        result = InvoiceTimeService().remove_line_entry(invoice, item, entry, non_billable=non_billable)
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "non_billable" if non_billable else "remove_entry")
+    if failed is not None:
+        return failed
+    hours = _hours_text(result["hours"])
+    if non_billable:
+        message = _("%(hours)s h taken off the invoice and marked non-billable.", hours=hours)
+    else:
+        message = _("%(hours)s h taken off the invoice; the entry is back in Unbilled.", hours=hours)
+    if result["line"] == "deleted":
+        message += " " + _("The line had no entries left and was removed.")
+    elif result["line"] == "manual":
+        message += " " + _("The line had no entries left; it was edited by hand, so it stays as a line added by hand.")
+    warnings = [_(PREPAID_FREED_WARNING)] if result["prepaid_freed"] else []
+    return _draft_done(invoice, message, data={"line": result["line"]}, anchor="hours", warnings=warnings)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/lines/<int:item_id>/entries/<int:entry_id>/remove", methods=["POST"])
+@login_required
+def draft_remove_entry(invoice_id, item_id, entry_id):
+    """× on an entry of a draft line: the entry leaves the invoice and goes back to Unbilled."""
+    return _remove_entry_action(invoice_id, item_id, entry_id, non_billable=False)
+
+
+@invoices_bp.route(
+    "/invoices/<int:invoice_id>/lines/<int:item_id>/entries/<int:entry_id>/non-billable", methods=["POST"]
+)
+@login_required
+def draft_non_billable_entry(invoice_id, item_id, entry_id):
+    """Non-billable on an entry of a draft line: the entry leaves the invoice and is never billed."""
+    return _remove_entry_action(invoice_id, item_id, entry_id, non_billable=True)
+
+
+def _form_template():
+    """The line template typed on the draft page, with line breaks as ``\\n``."""
+    return (request.form.get("line_template") or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _keep_edited():
+    return (request.form.get("keep_edited") or "keep").strip().lower() != "rebuild"
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/regroup", methods=["POST"])
+@login_required
+def draft_regroup(invoice_id):
+    """Regroup hours: the time lines are built again in another layout, from the same entries."""
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+    from app.utils.invoice_time_entry_items import HOURS_LAYOUT_LABELS, normalize_layout, normalize_template
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    layout = normalize_layout(request.form.get("hours_layout"))
+    if layout is None:
+        return _draft_failed(invoice.id, _("Choose how to show the hours."), 400, "invalid_hours_layout")
+    template = normalize_template(_form_template())
+    try:
+        lines = InvoiceTimeService().rebuild_lines(
+            invoice, layout, template, keep_edited=_keep_edited(), created_by=current_user.id
+        )
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "regroup")
+    if failed is not None:
+        return failed
+    message = _("Hours regrouped: %(layout)s.", layout=_(HOURS_LAYOUT_LABELS.get(layout, layout)))
+    return _draft_done(invoice, message, anchor="hours", warnings=lines.warnings)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/apply-template", methods=["POST"])
+@login_required
+def draft_apply_template(invoice_id):
+    """Apply to lines: rewrite the descriptions of the time lines from the line template."""
+    from flask_babel import ngettext
+
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    try:
+        count = InvoiceTimeService().apply_template(invoice, _form_template(), keep_edited=_keep_edited())
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "apply_template")
+    if failed is not None:
+        return failed
+    message = ngettext("%(num)d line rewritten.", "%(num)d lines rewritten.", count)
+    return _draft_done(invoice, message, anchor="hours")
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/lines", methods=["POST"])
+@login_required
+def draft_add_line(invoice_id):
+    """Add a line typed in: an hours line (``line_type=hours``) or another item (a fixed fee)."""
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    hours = (request.form.get("line_type") or "").strip() == "hours"
+    try:
+        item = InvoiceTimeService().add_manual_line(
+            invoice,
+            request.form.get("description"),
+            request.form.get("quantity"),
+            request.form.get("unit_price"),
+            hours=hours,
+        )
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "add_line")
+    if failed is not None:
+        return failed
+    return _draft_done(invoice, _("Line added."), data={"item_id": item.id}, anchor="hours" if hours else "other-items")
+
+
+DRAFT_LINE_FIELDS = (
+    "description",
+    "quantity",
+    "unit_price",
+    "tax_rate",
+    "vat_category",
+    "discount_percent",
+    "discount_amount",
+    "position",
+)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/lines/<int:item_id>", methods=["POST"])
+@login_required
+def draft_update_line(invoice_id, item_id):
+    """Change a draft line: description, quantity, price, the line's VAT and discount, position."""
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    item = _draft_line(invoice, item_id)
+    values = {field: request.form.get(field) for field in DRAFT_LINE_FIELDS if field in request.form}
+    try:
+        InvoiceTimeService().update_line(invoice, item, values)
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "update_line")
+    if failed is not None:
+        return failed
+    tracked = InvoiceTimeService.tracked_quantity(item)
+    line = {
+        "id": item.id,
+        "quantity": _money_text(item.quantity),
+        "unit_price": _money_text(item.unit_price),
+        "amount": _money_text(item.total_amount),
+        "description_edited": bool(item.description_edited),
+        "quantity_edited": bool(item.quantity_edited),
+        "price_edited": bool(item.price_edited),
+    }
+    if item.kind == "time":
+        line["quantity_note"] = (
+            _("edited · %(hours)s h tracked", hours=_hours_text(tracked)) if item.quantity_edited else _("= tracked")
+        )
+        line["price_note"] = _("edited") if item.price_edited else _("entries' rate")
+    return _draft_done(invoice, _("Line saved."), data={"line": line}, anchor=f"line-{item.id}", reload=False)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/lines/<int:item_id>/delete", methods=["POST"])
+@login_required
+def draft_delete_line(invoice_id, item_id):
+    """Delete a draft line; its time entries go back to Unbilled."""
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    item = _draft_line(invoice, item_id)
+    try:
+        result = InvoiceTimeService().delete_line(invoice, item)
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "delete_line")
+    if failed is not None:
+        return failed
+    message = _("Line removed.")
+    if result["entries"]:
+        message += " " + _("Its %(num)d time entries are back in Unbilled.", num=result["entries"])
+    warnings = [_(PREPAID_FREED_WARNING)] if result["prepaid_freed"] else []
+    return _draft_done(invoice, message, warnings=warnings)
+
+
+def _new_entries_warnings(result):
+    warnings = list(result.get("warnings") or [])
+    if result.get("skipped"):
+        warnings.append(
+            _(
+                "%(num)d entries were left out: their prepaid hours are recorded on another invoice.",
+                num=result["skipped"],
+            )
+        )
+    return warnings
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/new-entries/add", methods=["POST"])
+@login_required
+def draft_add_new_entries(invoice_id):
+    """Add to matching lines: new entries of the invoice's period join the lines they belong to."""
+    from flask import session
+
+    from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    entry_ids = None
+    raw_ids = request.form.getlist("entry_ids[]") or request.form.getlist("entry_ids")
+    if raw_ids:
+        entry_ids = []
+        for raw in raw_ids:
+            try:
+                entry_ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+    try:
+        result = InvoiceTimeService().add_new_entries(
+            invoice, entry_ids, created_by=current_user.id, allowed_project_ids=_user_project_ids()
+        )
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    failed = _draft_commit(invoice, "add_new_entries")
+    if failed is not None:
+        return failed
+    if not result["entries"]:
+        return _draft_done(invoice, _("No new entries to add."), anchor="hours", warnings=_new_entries_warnings(result))
+    session[DRAFT_ADDED_HOURS_KEY] = {str(k): str(v) for k, v in result["added"].items()}
+    message = _(
+        "%(entries)d new entries added: %(lines)d lines grew, %(new)d new lines.",
+        entries=result["entries"],
+        lines=len(result["added"]),
+        new=result["new_lines"],
+    )
+    if result["prepaid_hours"]:
+        message += " " + _(
+            "%(hours)s h of them are covered by prepaid hours.", hours=_hours_text(result["prepaid_hours"])
+        )
+    return _draft_done(invoice, message, anchor="hours", warnings=_new_entries_warnings(result))
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/notes-terms", methods=["POST"])
+@login_required
+def draft_notes_terms(invoice_id):
+    """Save the draft's Notes and Terms from the total card."""
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    if "notes" in request.form:
+        invoice.notes = (request.form.get("notes") or "").strip()
+    if "terms" in request.form:
+        invoice.terms = (request.form.get("terms") or "").strip()
+    failed = _draft_commit(invoice, "notes_terms")
+    if failed is not None:
+        return failed
+    return _draft_done(invoice, _("Notes and terms saved."), anchor="total", reload=False)
+
+
+@invoices_bp.route("/invoices/<int:invoice_id>/discount", methods=["POST"])
+@login_required
+def draft_discount(invoice_id):
+    """The invoice discount: a percent or an amount (an empty value removes it)."""
+    from app.services.invoice_time_service import InvalidLineValueError, InvoiceTimeError, InvoiceTimeService
+
+    invoice, refusal = _draft_for_action(invoice_id)
+    if refusal is not None:
+        return refusal
+    kind = (request.form.get("discount_type") or "percent").strip()
+    try:
+        value = InvoiceTimeService.parse_amount(
+            request.form.get("discount_value"), "discount", allow_empty=True, minimum=Decimal("0")
+        )
+        if kind == "percent" and value is not None and value > 100:
+            raise InvalidLineValueError("discount", "too_high")
+    except InvoiceTimeError as exc:
+        return _draft_error(invoice, exc)
+    value = value or Decimal("0")
+    if kind == "amount":
+        invoice.discount_amount = value.quantize(Decimal("0.01"))
+        invoice.discount_percent = Decimal("0")
+    else:
+        invoice.discount_percent = value.quantize(Decimal("0.01"))
+        invoice.discount_amount = Decimal("0")
+    invoice.calculate_totals()
+    failed = _draft_commit(invoice, "discount")
+    if failed is not None:
+        return failed
+    message = _("Discount removed.") if not value else _("Discount saved.")
+    return _draft_done(invoice, message, anchor="total")
