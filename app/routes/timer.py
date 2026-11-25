@@ -43,6 +43,15 @@ def _parse_optional_int(value):
         return None
 
 
+def _wants_json():
+    """True when the client prefers a JSON response over a redirect+flash."""
+    return (
+        "application/json" in (request.headers.get("Accept") or "")
+        or request.is_json
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    )
+
+
 def _parse_duration_to_seconds(raw_value):
     """Parse a duration string into seconds; return None if unparseable.
 
@@ -151,11 +160,15 @@ def _edit_timer_form_projects_tasks(timer, can_edit_schedule):
 
 def _edit_timer_render_kwargs(timer, can_edit_schedule, show_source_dropdown):
     from app.services.custom_field_service import CustomFieldService
+    from app.services.invoice_time_service import InvoiceTimeService
     from app.utils.scope_filter import get_active_clients_for_user
 
     projects, tasks = _edit_timer_form_projects_tasks(timer, can_edit_schedule)
     clients = get_active_clients_for_user(current_user) if can_edit_schedule else []
+    billing_state, billing_invoice = InvoiceTimeService().billing_states([timer]).get(timer.id, (None, None))
     return {
+        "billing_state": billing_state,
+        "billing_invoice": billing_invoice,
         "timer": timer,
         "projects": projects,
         "tasks": tasks,
@@ -675,9 +688,12 @@ def start_timer_for_project(project_id):
 def stop_timer():
     """Stop the current user's active timer"""
     active_timer = current_user.active_timer
+    wants_json = _wants_json()
     current_app.logger.info("POST /timer/stop user=%s active_timer=%s", current_user.username, bool(active_timer))
 
     if not active_timer:
+        if wants_json:
+            return jsonify({"success": False, "error": "no_active_timer"}), 400
         flash(_("No active timer to stop"), "error")
         return redirect(url_for("main.dashboard"))
 
@@ -746,7 +762,7 @@ def stop_timer():
             awarded = GamificationService().check_and_award_badges(
                 current_user.id, "time_entry_created", {"entry_id": active_timer.id}
             )
-            if awarded:
+            if awarded and not wants_json:
                 flash(_("Badge earned: %(name)s", name=awarded[0].get("name", "Badge")), "success")
         except Exception:
             current_app.logger.debug("Gamification hook failed", exc_info=True)
@@ -783,7 +799,8 @@ def stop_timer():
         except Exception as e:
             current_app.logger.warning("Failed to invalidate dashboard cache: %s", e)
 
-        _flash_overwork_note(active_timer, current_user.id)
+        if not wants_json:
+            _flash_overwork_note(active_timer, current_user.id)
 
         # Pass data for post-timer toast (message + link to time entries; no flash to avoid duplicate)
         project_name = (
@@ -791,6 +808,15 @@ def stop_timer():
             if active_timer.project
             else (active_timer.client.name if active_timer.client else _("No project"))
         )
+        if wants_json:
+            return jsonify(
+                {
+                    "success": True,
+                    "duration": active_timer.duration_formatted,
+                    "project_name": project_name,
+                }
+            )
+
         session["timer_stopped_toast"] = {
             "duration": active_timer.duration_formatted,
             "project_name": project_name,
@@ -800,6 +826,8 @@ def stop_timer():
     except ValueError as e:
         # Timer already stopped or invalid state
         current_app.logger.warning("Cannot stop timer: %s", e)
+        if wants_json:
+            return jsonify({"success": False, "error": str(e)}), 400
         flash(_("Cannot stop timer: %(error)s", error=str(e)), "error")
         return redirect(url_for("main.dashboard"))
     except Exception as e:
@@ -812,6 +840,8 @@ def stop_timer():
             exc=e,
             level="exception",
         )
+        if wants_json:
+            return jsonify({"success": False, "error": "stop_failed"}), 500
         flash(
             _("Could not stop timer due to an error. Please try again or contact support if the problem persists."),
             "error",
@@ -824,23 +854,35 @@ def stop_timer():
 def pause_timer():
     """Pause the current user's active timer (clock stops; break accumulates on resume)."""
     active_timer = current_user.active_timer
+    wants_json = _wants_json()
     if not active_timer:
+        if wants_json:
+            return jsonify({"success": False, "error": "no_active_timer"}), 400
         flash(_("No active timer to pause"), "error")
         return redirect(url_for("main.dashboard"))
     try:
         active_timer.pause_timer()
-        flash(_("Timer paused"), "success")
+        if not wants_json:
+            flash(_("Timer paused"), "success")
     except ValueError as e:
+        if wants_json:
+            return jsonify({"success": False, "error": str(e)}), 400
         flash(_(str(e)), "error")
+        return redirect(url_for("main.dashboard"))
     except Exception as e:
         current_app.logger.exception("Error pausing timer: %s", e)
+        if wants_json:
+            return jsonify({"success": False, "error": "pause_failed"}), 500
         flash(_("Could not pause timer. Please try again."), "error")
+        return redirect(url_for("main.dashboard"))
     try:
         from app.utils.cache import invalidate_dashboard_for_user
 
         invalidate_dashboard_for_user(current_user.id)
     except Exception as e:
         safe_log(current_app.logger, "debug", "Dashboard cache invalidation failed: %s", e)
+    if wants_json:
+        return jsonify({"success": True})
     return redirect(url_for("main.dashboard"))
 
 
@@ -849,23 +891,35 @@ def pause_timer():
 def resume_timer():
     """Resume a paused timer (time since pause is counted as break)."""
     active_timer = current_user.active_timer
+    wants_json = _wants_json()
     if not active_timer:
+        if wants_json:
+            return jsonify({"success": False, "error": "no_active_timer"}), 400
         flash(_("No active timer to resume"), "error")
         return redirect(url_for("main.dashboard"))
     try:
         active_timer.resume_timer()
-        flash(_("Timer resumed"), "success")
+        if not wants_json:
+            flash(_("Timer resumed"), "success")
     except ValueError as e:
+        if wants_json:
+            return jsonify({"success": False, "error": str(e)}), 400
         flash(_(str(e)), "error")
+        return redirect(url_for("main.dashboard"))
     except Exception as e:
         current_app.logger.exception("Error resuming timer: %s", e)
+        if wants_json:
+            return jsonify({"success": False, "error": "resume_failed"}), 500
         flash(_("Could not resume timer. Please try again."), "error")
+        return redirect(url_for("main.dashboard"))
     try:
         from app.utils.cache import invalidate_dashboard_for_user
 
         invalidate_dashboard_for_user(current_user.id)
     except Exception as e:
         safe_log(current_app.logger, "debug", "Dashboard cache invalidation failed: %s", e)
+    if wants_json:
+        return jsonify({"success": True})
     return redirect(url_for("main.dashboard"))
 
 
@@ -1115,7 +1169,7 @@ def edit_timer(timer_id):
                 "timer/edit_timer.html",
                 **_edit_timer_render_kwargs(timer, can_edit_schedule, show_source_dropdown),
             )
-        flash(_(locked["message"]), "warning")
+        # A GET shows the "on invoice" notice in the form itself
 
     if request.method == "POST":
         from app.utils.validation import sanitize_input
@@ -2974,6 +3028,11 @@ def time_entries_overview():
                 current_app.logger.debug("Rollback after pending-approvals query failure also failed", exc_info=True)
             entry_ids_with_pending_approval = set()
 
+    # Which invoice bills each entry on the page: one query for the page, not one per entry
+    from app.services.invoice_time_service import InvoiceTimeService
+
+    billing_states = InvoiceTimeService().billing_states(time_entries)
+
     # Check if this is an AJAX request
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         # Return only the time entries list HTML for AJAX requests
@@ -2991,6 +3050,7 @@ def time_entries_overview():
                 link_templates_by_field=link_templates_by_field,
                 time_approvals_enabled=time_approvals_enabled,
                 entry_ids_with_pending_approval=entry_ids_with_pending_approval,
+                billing_states=billing_states,
             )
         )
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -3012,6 +3072,7 @@ def time_entries_overview():
         link_templates_by_field=link_templates_by_field,
         time_approvals_enabled=time_approvals_enabled,
         entry_ids_with_pending_approval=entry_ids_with_pending_approval,
+        billing_states=billing_states,
         totals={
             "total_hours": round(total_hours, 2),
             "total_billable_hours": round(total_billable_hours, 2),

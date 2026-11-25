@@ -113,12 +113,19 @@ def _newest_invoice():
 
 
 def test_create_form_offers_currency_select(app, authenticated_client, project):
+    """New invoice, step 1 (``/invoices/new``): the currency select, and the client's default currency in
+    the page data the script reads (its last invoice's currency, else the settings currency)."""
+    import json
+    import re
+
     _usd_settings()
-    resp = authenticated_client.get("/invoices/create")
+    resp = authenticated_client.get("/invoices/new")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert 'name="currency_code"' in html
-    assert 'data-currency="USD"' in html  # project option carries its client's default currency
+    data = json.loads(re.search(r'id="stepOneData"[^>]*>(.*?)</script>', html, re.S).group(1))
+    assert data["defaultCurrency"] == "USD"
+    assert data["currencies"].get(str(project.client_id), data["defaultCurrency"]) == "USD"
 
 
 def test_create_uses_chosen_currency(app, authenticated_client, project, test_client):
