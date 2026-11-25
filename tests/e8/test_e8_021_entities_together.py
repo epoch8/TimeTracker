@@ -42,7 +42,7 @@ def _modules_off(*ids):
 
 
 def _form_html(client):
-    return client.get("/invoices/create").get_data(as_text=True)
+    return client.get("/invoices/new").get_data(as_text=True)
 
 
 @pytest.mark.parametrize(
