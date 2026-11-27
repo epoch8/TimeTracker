@@ -105,6 +105,11 @@ class Invoice(db.Model):
     period_end = db.Column(db.Date, nullable=True)
     hours_layout = db.Column(db.String(20), nullable=True)
     line_template = db.Column(db.String(255), nullable=True)
+    # How project costs become lines: "cost" (a line per cost), "category" or "one_line"; None: per cost
+    costs_layout = db.Column(db.String(20), nullable=True)
+    # The invoice PDF is followed by the expenses' receipts / the project costs' supplier bills
+    attach_receipts = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
+    attach_bills = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
 
     # Relationships
     project = db.relationship("Project", backref="invoices")
@@ -168,6 +173,34 @@ class Invoice(db.Model):
 
     def __repr__(self):
         return f"<Invoice {self.invoice_number} ({self.client_name})>"
+
+    @property
+    def display_client_name(self):
+        """Client name for lists/search/exports: live record, fallback to document snapshot."""
+        return self.client.name if self.client else self.client_name
+
+    @property
+    def display_client_email(self):
+        """Client email for navigation; document paths should use client_email snapshot."""
+        if self.client and self.client.email:
+            return self.client.email
+        return self.client_email
+
+    @property
+    def display_client_address(self):
+        """Client address for navigation; document paths should use client_address snapshot."""
+        if self.client and self.client.address:
+            return self.client.address
+        return self.client_address
+
+    def sync_client_snapshot_from_client(self):
+        """Copy live Client name/email/address onto this invoice's document snapshot fields."""
+        client = self.client
+        if not client:
+            return
+        self.client_name = client.name
+        self.client_email = client.email
+        self.client_address = client.address
 
     @property
     def is_overdue(self):
@@ -558,8 +591,9 @@ class InvoiceItem(db.Model):
     # Time entry reference (optional)
     time_entry_ids = db.Column(db.Text, nullable=True)  # Comma-separated IDs
 
-    # "time": built from time entries; "manual": typed in. A rebuild leaves manual lines alone and
-    # keeps a time line whose description, quantity or price was changed by hand.
+    # "time": built from time entries; "manual": typed in; "manual_hours": hours typed in; "cost": bills
+    # project costs (ProjectCost.invoice_item_id). A rebuild leaves manual lines alone and keeps a time
+    # line whose description, quantity or price was changed by hand.
     kind = db.Column(db.String(20), nullable=False, default="manual", server_default="manual")
     description_edited = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
     quantity_edited = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())

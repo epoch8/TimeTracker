@@ -1022,6 +1022,10 @@ def create_app(config=None):
             # observable in the wild without breaking pages. Once the end-to-end suite
             # confirms zero script-src violations, the Report-Only policy becomes the
             # enforced one and 'unsafe-inline' is dropped.
+            # OAuth consent may set g.csp_form_action_extra to the validated client
+            # redirect origin so Approve's 302 is not blocked by form-action.
+            form_action_extra = getattr(g, "csp_form_action_extra", None)
+            form_action = f"form-action 'self' {form_action_extra}" if form_action_extra else "form-action 'self'"
             if not response.headers.get("Content-Security-Policy"):
                 response.headers["Content-Security-Policy"] = (
                     "default-src 'self'; "
@@ -1033,7 +1037,7 @@ def create_app(config=None):
                     "frame-src 'self' blob:; "
                     "object-src 'none'; "
                     "base-uri 'self'; "
-                    "form-action 'self'; "
+                    f"{form_action}; "
                     "frame-ancestors 'none'"
                 )
             if not response.headers.get("Content-Security-Policy-Report-Only"):
@@ -1062,7 +1066,7 @@ def create_app(config=None):
                         "frame-src 'self' blob:; "
                         "object-src 'none'; "
                         "base-uri 'self'; "
-                        "form-action 'self'; "
+                        f"{form_action}; "
                         "frame-ancestors 'none'; "
                         "report-uri /csp-report"
                     )
@@ -1703,16 +1707,30 @@ def create_app(config=None):
                 if not User.query.filter_by(username=admin_username).first():
                     from app.models import Role
 
-                    admin_user = User(username=admin_username, role="admin")
-                    admin_user.is_active = True
+                    bootstrap_password = (app.config.get("ADMIN_BOOTSTRAP_PASSWORD") or "").strip()
+                    if not bootstrap_password:
+                        print(
+                            f"Skipped creating default admin user '{admin_username}': "
+                            "set ADMIN_BOOTSTRAP_PASSWORD and restart to bootstrap."
+                        )
+                    else:
+                        # Always set a password so AUTH_METHOD=saml/oidc/none cannot
+                        # yield an empty-credential remote admin takeover.
+                        admin_user = User(username=admin_username, role="admin")
+                        admin_user.is_active = True
+                        admin_user.set_password(bootstrap_password)
+                        admin_user.password_change_required = True
 
-                    admin_role = Role.query.filter_by(name="admin").first()
-                    if admin_role:
-                        admin_user.roles.append(admin_role)
+                        admin_role = Role.query.filter_by(name="admin").first()
+                        if admin_role:
+                            admin_user.roles.append(admin_role)
 
-                    db.session.add(admin_user)
-                    db.session.commit()
-                    print(f"Created default admin user: {admin_username}")
+                        db.session.add(admin_user)
+                        db.session.commit()
+                        print(
+                            f"Created default admin user: {admin_username} "
+                            "(password set from ADMIN_BOOTSTRAP_PASSWORD; change on first login)"
+                        )
 
             print("Database initialized successfully")
         except Exception as e:
@@ -1787,16 +1805,28 @@ def init_database(app):
                 if not User.query.filter_by(username=admin_username).first():
                     from app.models import Role
 
-                    admin_user = User(username=admin_username, role="admin")
-                    admin_user.is_active = True
+                    bootstrap_password = (app.config.get("ADMIN_BOOTSTRAP_PASSWORD") or "").strip()
+                    if not bootstrap_password:
+                        print(
+                            f"Skipped creating default admin user '{admin_username}': "
+                            "set ADMIN_BOOTSTRAP_PASSWORD and restart to bootstrap."
+                        )
+                    else:
+                        admin_user = User(username=admin_username, role="admin")
+                        admin_user.is_active = True
+                        admin_user.set_password(bootstrap_password)
+                        admin_user.password_change_required = True
 
-                    admin_role = Role.query.filter_by(name="admin").first()
-                    if admin_role:
-                        admin_user.roles.append(admin_role)
+                        admin_role = Role.query.filter_by(name="admin").first()
+                        if admin_role:
+                            admin_user.roles.append(admin_role)
 
-                    db.session.add(admin_user)
-                    db.session.commit()
-                    print(f"Created default admin user: {admin_username}")
+                        db.session.add(admin_user)
+                        db.session.commit()
+                        print(
+                            f"Created default admin user: {admin_username} "
+                            "(password set from ADMIN_BOOTSTRAP_PASSWORD; change on first login)"
+                        )
 
             print("Database initialized successfully")
         except Exception as e:

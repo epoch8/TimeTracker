@@ -81,6 +81,7 @@ def get_invoice(invoice_id):
 def create_invoice():
     """Create a new invoice."""
     from app.services import InvoiceService
+    from app.utils.api_object_auth import require_client_access, require_project_access
 
     data = request.get_json() or {}
     errors = {}
@@ -90,6 +91,12 @@ def create_invoice():
         for f in missing:
             errors[f] = [f"{f} is required"]
         return validation_error_response(errors=errors, message=f"Missing required fields: {', '.join(missing)}")
+    err = require_client_access(data.get("client_id"))
+    if err:
+        return err
+    err = require_project_access(data.get("project_id"))
+    if err:
+        return err
     due_dt = _parse_date(data.get("due_date"))
     if not due_dt:
         return validation_error_response(
@@ -131,6 +138,9 @@ def update_invoice(invoice_id):
     """Update an invoice."""
     from app.services import InvoiceService
 
+    invoice, err = _load_invoice_for_api(invoice_id)
+    if err:
+        return err
     data = request.get_json() or {}
     update_kwargs = {}
     # status / amount_paid are not mass-assignable via generic update (use cancel/payment flows).
@@ -159,7 +169,7 @@ def update_invoice(invoice_id):
         except (ValueError, TypeError) as e:
             current_app.logger.warning("Invalid tax_rate value in invoice update: %s - %s", data.get("tax_rate"), e)
     invoice_service = InvoiceService()
-    result = invoice_service.update_invoice(invoice_id=invoice_id, user_id=g.api_user.id, **update_kwargs)
+    result = invoice_service.update_invoice(invoice_id=invoice.id, user_id=g.api_user.id, **update_kwargs)
     if not result.get("success"):
         return error_response(result.get("message", "Could not update invoice"), status_code=400)
     direct_dirty = False
@@ -197,8 +207,11 @@ def update_invoice(invoice_id):
 @require_api_token("write:invoices")
 def delete_invoice(invoice_id):
     """Cancel an invoice (soft-delete)."""
+    invoice, err = _load_invoice_for_api(invoice_id)
+    if err:
+        return err
     result = _invoice_service().update_invoice(
-        invoice_id=invoice_id, user_id=g.api_user.id, status="cancelled", _allow_status=True
+        invoice_id=invoice.id, user_id=g.api_user.id, status="cancelled", _allow_status=True
     )
     if not result.get("success"):
         return error_response(result.get("message", "Could not cancel invoice"), status_code=400)
@@ -343,7 +356,8 @@ def set_invoice_items(invoice_id):
         return error_response(
             result.get("message", "Could not update items"),
             status_code=status,
-            error_code=result.get("error") if status == 409 else None,
+            # A line id sent twice says so: the client can fix its request
+            error_code=result.get("error") if status == 409 or result.get("error") == "duplicate_line_id" else None,
         )
     detail = _invoice_service().get_invoice_detail(invoice_id, user_id=g.api_user.id, is_admin=g.api_user.is_admin)
     return jsonify({"message": result["message"], "invoice": detail.get("invoice")})
@@ -423,6 +437,10 @@ def request_invoice_approval(invoice_id):
     """Request approval for an invoice."""
     from app.services.invoice_approval_service import InvoiceApprovalService
 
+    invoice, err = _load_invoice_for_api(invoice_id)
+    if err:
+        return err
+
     data = request.get_json() or {}
     approvers = data.get("approver_ids") or data.get("approvers") or []
     if not isinstance(approvers, list) or not approvers:
@@ -432,7 +450,7 @@ def request_invoice_approval(invoice_id):
         )
     service = InvoiceApprovalService()
     result = service.request_approval(
-        invoice_id=invoice_id,
+        invoice_id=invoice.id,
         requested_by=g.api_user.id,
         approvers=[int(a) for a in approvers],
     )
@@ -501,12 +519,11 @@ def send_invoice_peppol_api(invoice_id):
     upstream exposes Peppol send only as a session web route;
     agents need a token-scoped path. Mirrors send_invoice_peppol_route.
     """
-    from app.models import Invoice
     from app.services import PeppolService
 
-    invoice = Invoice.query.get(invoice_id)
-    if not invoice:
-        return error_response("Invoice not found", status_code=404)
+    invoice, err = _load_invoice_for_api(invoice_id)
+    if err:
+        return err
     try:
         service = PeppolService()
         success, tx, message = service.send_invoice(invoice=invoice, triggered_by_user_id=g.api_user.id)

@@ -1796,6 +1796,23 @@ def edit_cost(project_id, cost_id):
             flash(_("Invalid date format"), "error")
             return render_template("projects/edit_cost.html", project=project, cost=cost, **_cost_form_context(cost))
 
+        # An issued invoice bills this cost: its amount, date and billable flag stay
+        from app.services.invoice_costs_service import InvoiceCostsService
+
+        locked = InvoiceCostsService().edit_lock(
+            cost, amount=amount, date=cost_date, billable=billable, currency_code=currency_code
+        )
+        if locked:
+            flash(
+                _(
+                    "This cost is on invoice %(number)s, which was issued: its amount, currency, date and billable flag "
+                    "cannot change, and it cannot be deleted. Cancel the invoice first.",
+                    number=locked.invoice_number,
+                ),
+                "error",
+            )
+            return render_template("projects/edit_cost.html", project=project, cost=cost, **_cost_form_context(cost))
+
         current_category_id = cost.category_id
         category_error = _apply_cost_category(cost, current_category_id=current_category_id)
         if category_error:
@@ -2546,7 +2563,8 @@ def upload_project_attachment(project_id):
 
     # File upload configuration
     ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "pdf", "doc", "docx", "txt", "xls", "xlsx", "zip", "rar"}
-    UPLOAD_FOLDER = "app/static/uploads/project_attachments"
+    # Private attachments live outside the public /static/ tree
+    UPLOAD_FOLDER = "uploads/project_attachments"
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
     def allowed_file(filename):

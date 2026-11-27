@@ -1163,15 +1163,23 @@ def create_user():
         default_password = request.form.get("default_password", "").strip()
         force_password_change = request.form.get("force_password_change") == "on"
 
+        from app.utils.role_assignment import filter_assignable_roles, user_can_assign_role
+
         if not username:
             flash(_("Username is required"), "error")
-            all_roles = Role.query.order_by(Role.name).all()
+            all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
+            return render_template("admin/user_form.html", user=None, all_roles=all_roles)
+
+        allowed, role_err = user_can_assign_role(current_user, role_name)
+        if not allowed:
+            flash(_(role_err), "error")
+            all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
             return render_template("admin/user_form.html", user=None, all_roles=all_roles)
 
         # Check if user already exists
         if User.query.filter_by(username=username).first():
             flash(_("User already exists"), "error")
-            all_roles = Role.query.order_by(Role.name).all()
+            all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
             return render_template("admin/user_form.html", user=None, all_roles=all_roles)
 
         # Get the Role object from the database
@@ -1181,7 +1189,7 @@ def create_user():
             role_obj = Role.query.filter_by(name="user").first()
             if not role_obj:
                 flash(_("Default 'user' role not found. Please run 'flask seed_permissions_cmd' first."), "error")
-                all_roles = Role.query.order_by(Role.name).all()
+                all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
                 return render_template("admin/user_form.html", user=None, all_roles=all_roles)
 
         # Create user with legacy role field for backward compatibility
@@ -1205,14 +1213,18 @@ def create_user():
         db.session.add(user)
         if not safe_commit("admin_create_user", {"username": username}):
             flash(_("Could not create user due to a database error. Please check server logs."), "error")
-            all_roles = Role.query.order_by(Role.name).all()
+            from app.utils.role_assignment import filter_assignable_roles
+
+            all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
             return render_template("admin/user_form.html", user=None, all_roles=all_roles)
 
         flash(_('User "%(username)s" created successfully', username=username), "success")
         return redirect(url_for("admin.list_users"))
 
     # GET request - show form with available roles
-    all_roles = Role.query.order_by(Role.name).all()
+    from app.utils.role_assignment import filter_assignable_roles
+
+    all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
     return render_template("admin/user_form.html", user=None, all_roles=all_roles)
 
 
@@ -1225,7 +1237,9 @@ def edit_user(user_id):
 
     user = User.query.get_or_404(user_id)
     clients = Client.query.filter_by(status="active").order_by(Client.name).all()
-    all_roles = Role.query.order_by(Role.name).all()
+    from app.utils.role_assignment import filter_assignable_roles, user_can_assign_role, user_can_reset_password_for
+
+    all_roles = filter_assignable_roles(current_user, Role.query.order_by(Role.name).all())
     assigned_client_ids = [c.id for c in user.assigned_clients.all()]
 
     if request.method == "POST":
@@ -1238,6 +1252,17 @@ def edit_user(user_id):
 
         if not username:
             flash(_("Username is required"), "error")
+            return render_template(
+                "admin/user_form.html",
+                user=user,
+                clients=clients,
+                all_roles=all_roles,
+                assigned_client_ids=assigned_client_ids,
+            )
+
+        allowed, role_err = user_can_assign_role(current_user, role_name)
+        if not allowed:
+            flash(_(role_err), "error")
             return render_template(
                 "admin/user_form.html",
                 user=user,
@@ -1290,6 +1315,17 @@ def edit_user(user_id):
         force_password_change = request.form.get("force_password_change") == "on"
 
         if new_password:
+            pw_ok, pw_err = user_can_reset_password_for(current_user, user)
+            if not pw_ok:
+                flash(_(pw_err), "error")
+                return render_template(
+                    "admin/user_form.html",
+                    user=user,
+                    clients=clients,
+                    all_roles=all_roles,
+                    assigned_client_ids=assigned_client_ids,
+                )
+
             # Validate password
             if len(new_password) < 8:
                 flash(_("Password must be at least 8 characters long."), "error")
@@ -2561,15 +2597,11 @@ def pdf_layout():
             f"[PDF_TEMPLATE] Committing template to database - PageSize: '{page_size}', TemplateID: {template.id}, User: {current_user.username}"
         )
         if not safe_commit("admin_update_pdf_layout"):
-            from flask_babel import gettext as _
-
             current_app.logger.error(
                 f"[PDF_TEMPLATE] Database commit failed - PageSize: '{page_size}', TemplateID: {template.id}, User: {current_user.username}"
             )
             flash(_("Could not update PDF layout due to a database error."), "error")
         else:
-            from flask_babel import gettext as _
-
             # Verify that template_json was actually saved
             db.session.refresh(template)
             if template.template_json and template.template_json.strip() and template.template_json == template_json:
@@ -2630,7 +2662,7 @@ def pdf_layout():
     try:
         if not initial_html:
             env = current_app.jinja_env
-            html_src, _, _ = env.loader.get_source(env, "invoices/pdf_default.html")
+            html_src = env.loader.get_source(env, "invoices/pdf_default.html")[0]
             # Extract body only for editor
             try:
                 import re as _re
@@ -2643,7 +2675,7 @@ def pdf_layout():
         if not initial_css:
             try:
                 env = current_app.jinja_env
-                css_src, _, _ = env.loader.get_source(env, "invoices/pdf_styles_default.css")
+                css_src = env.loader.get_source(env, "invoices/pdf_styles_default.css")[0]
                 initial_css = css_src
             except Exception as e:
                 # Log but continue - CSS loading failure is not critical
@@ -3859,8 +3891,6 @@ def pdf_layout_preview():
 
     # Wrap provided HTML with a minimal page and CSS
     try:
-        from pathlib import Path as _Path
-
         # Provide helpers as callables since templates may use function-style helpers
         try:
             from babel.dates import format_date as _babel_format_date
@@ -3906,7 +3936,6 @@ def pdf_layout_preview():
             autoescape=True,
             invoice=invoice,
             settings=settings_obj,
-            Path=_Path,
             format_date=_format_date,
             format_money=_format_money,
             get_logo_base64=_get_logo_base64,
@@ -4469,8 +4498,6 @@ def quote_pdf_layout_preview():
 
     # Wrap provided HTML with a minimal page and CSS
     try:
-        from pathlib import Path as _Path
-
         # Provide helpers as callables since templates may use function-style helpers
         try:
             from babel.dates import format_date as _babel_format_date
@@ -4516,7 +4543,6 @@ def quote_pdf_layout_preview():
             autoescape=True,
             quote=quote,
             settings=settings_obj,
-            Path=_Path,
             format_date=_format_date,
             format_money=_format_money,
             get_logo_base64=_get_logo_base64,
