@@ -443,6 +443,10 @@ class InvoiceService:
                     "status": previous_status,
                 }
 
+        # Freeze buyer contact details from the live client when leaving draft (PDF/email/e-invoice).
+        if prev == "draft" and new_status != "draft":
+            invoice.sync_client_snapshot_from_client()
+
         invoice.status = new_status
 
         try:
@@ -683,13 +687,24 @@ class InvoiceService:
         if not invoice:
             return {"success": False, "message": "Invoice not found", "error": "not_found"}
 
-        # Update fields
-        if "client_name" in kwargs:
-            invoice.client_name = kwargs["client_name"]
-        if "client_email" in kwargs:
-            invoice.client_email = kwargs["client_email"]
-        if "client_address" in kwargs:
-            invoice.client_address = kwargs["client_address"]
+        from app.models import User
+
+        actor = User.query.get(user_id) if user_id else None
+        is_admin = bool(actor and getattr(actor, "is_admin", False))
+        if not self.user_can_access_invoice(invoice, user_id, is_admin):
+            return {"success": False, "message": "Permission denied", "error": "forbidden"}
+
+        # Update fields. Drafts refresh name/email/address from the linked Client;
+        # issued invoices keep their frozen snapshot (client_* kwargs are ignored when draft sync runs).
+        if invoice.status == "draft":
+            invoice.sync_client_snapshot_from_client()
+        else:
+            if "client_name" in kwargs:
+                invoice.client_name = kwargs["client_name"]
+            if "client_email" in kwargs:
+                invoice.client_email = kwargs["client_email"]
+            if "client_address" in kwargs:
+                invoice.client_address = kwargs["client_address"]
         if "due_date" in kwargs:
             invoice.due_date = kwargs["due_date"]
         if "notes" in kwargs:
@@ -812,8 +827,16 @@ class InvoiceService:
             query = query.filter(Invoice.payment_status == payment_status)
 
         if search:
+            from app.models import Client
+
             like = f"%{search}%"
-            query = query.filter(db.or_(Invoice.invoice_number.ilike(like), Invoice.client_name.ilike(like)))
+            query = query.outerjoin(Client, Invoice.client_id == Client.id).filter(
+                db.or_(
+                    Invoice.invoice_number.ilike(like),
+                    Invoice.client_name.ilike(like),
+                    Client.name.ilike(like),
+                )
+            )
 
         if project_id:
             query = query.filter(Invoice.project_id == project_id)
@@ -1493,6 +1516,10 @@ class InvoiceService:
         from app.services.invoice_time_service import InvoiceTimeError, InvoiceTimeService, line_entry_ids
 
         time_links = InvoiceTimeService()
+        # A line id may come once: a second row with it would bill the same costs or entries twice
+        sent_ids = [str(row.get("id")) for row in items if row.get("id") not in (None, "")]
+        if len(sent_ids) != len(set(sent_ids)):
+            return {"success": False, "message": "A line id appears more than once", "error": "duplicate_line_id"}
         # Every listed time entry must be one this invoice may bill (as in the picker), on one line only
         try:
             time_links.check_line_entries(
@@ -1507,6 +1534,9 @@ class InvoiceService:
         # price changes is marked as edited by hand.
         previous_lines = time_links.snapshot_lines(invoice)
         previous_hours = time_links.detach_lines(invoice)
+        from app.services.invoice_costs_service import InvoiceCostsService
+
+        cost_lines = InvoiceCostsService.snapshot_cost_lines(invoice)
         invoice.items.delete()
         new_items: List[InvoiceItem] = []
         row_ids: List[Any] = []
@@ -1564,6 +1594,8 @@ class InvoiceService:
             return {"success": False, "message": str(exc), "error": exc.code}
         for item, row_id in zip(new_items, row_ids):
             time_links.carry_line_state(previous_lines, item, row_id)
+        # A row with the id of a cost line keeps its project costs; the costs of a line left out are unbilled
+        InvoiceCostsService().carry_cost_lines(invoice, cost_lines, new_items, row_ids)
         # Entries no line keeps any more give back the prepaid hours they used on this draft
         time_links.release_dropped_prepaid(invoice, previous_hours.keys())
 
@@ -1592,7 +1624,7 @@ class InvoiceService:
         ``hours_layout`` and ``line_template`` say how the hours become lines; by default the
         project's last ones (``group`` is the older switch: False means one line per entry).
         """
-        from app.utils.invoice_time_entry_items import legacy_layout
+        from app.utils.invoice_time_entry_items import BillableTimeEntry, legacy_layout
 
         invoice = self.invoice_repo.get_by_id(invoice_id)
         if not invoice:
@@ -1647,9 +1679,15 @@ class InvoiceService:
 
         if hours_layout is None and group is not None:
             hours_layout = legacy_layout(group)
+        # An entry that stays keeps the hours its old line billed: what prepaid hours did not cover.
+        # Its full duration would bill the prepaid part a second time.
+        to_bill = [
+            BillableTimeEntry(entry=e, billable_hours=previous_hours[e.id]) if e.id in previous_hours else e
+            for e in entries
+        ]
         lines = time_links.add_entries(
             invoice,
-            entries,
+            to_bill,
             hours_layout,
             line_template,
             hours_by_entry=previous_hours,
@@ -1702,11 +1740,14 @@ class InvoiceService:
         try:
             from app.models import Settings
             from app.utils.invoice_pdf_postprocess import postprocess_invoice_pdf_bytes
+            from app.utils.invoice_receipts import attach_invoice_files
             from app.utils.pdf_generator import InvoicePDFGenerator
 
             settings = Settings.get_settings()
             pdf_generator = InvoicePDFGenerator(invoice, settings=settings, page_size=page_size)
             pdf_bytes = pdf_generator.generate_pdf()
+            # The receipts and bills the invoice is set to attach follow it in the same PDF
+            pdf_bytes, _attached = attach_invoice_files(pdf_bytes, invoice, "api")
             pdf_bytes, embed_err, pdfa_err = postprocess_invoice_pdf_bytes(pdf_bytes, invoice, settings)
             if embed_err or pdfa_err:
                 return {
@@ -1723,10 +1764,12 @@ class InvoiceService:
             }
         except Exception as exc:
             try:
+                from app.utils.invoice_receipts import attach_invoice_files
                 from app.utils.pdf_generator_fallback import InvoicePDFGeneratorFallback
 
                 fallback = InvoicePDFGeneratorFallback(invoice, page_size=page_size)
                 pdf_bytes = fallback.generate_pdf()
+                pdf_bytes, _attached = attach_invoice_files(pdf_bytes, invoice, "api")
                 return {
                     "success": True,
                     "pdf_bytes": pdf_bytes,
