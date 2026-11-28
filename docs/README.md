@@ -67,6 +67,7 @@ docs/
 - **[Client Management](CLIENT_MANAGEMENT_README.md)** — Manage clients and relationships
 - **[Invoice System](INVOICE_FEATURE_README.md)** — Two-step create, draft with time links, Issued / Cancel and reissue, legal entities, HTML + Visual templates
 - **[Invoice reminders & recurring](features/INVOICE_REMINDERS_AND_RECURRING.md)** — Overdue notify, dunning policies/late fees, recurring billing
+- **[Legal entities](LEGAL_ENTITIES.md)** — Our legal entities (From, Pay to), client legal entities (Bill to), invoice numbering by series and the printed number
 - **[Invoice expenses](INVOICE_EXPENSES.md)** — Bill expenses on step 1 and drafts
 - **[Project costs](features/PROJECT_COSTS_FEATURE.md)** — Non-hourly costs (Expense categories) on invoices
 - **[MCP server](integrations/MCP.md)** — Optional Model Context Protocol sidecar for AI assistants

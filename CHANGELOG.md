@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Legal entities** — [LEGAL_ENTITIES.md](docs/LEGAL_ENTITIES.md): the `billing_entities` and `client_entities` modules (our legal entities, payment accounts, invoice defaults, Bill to, Who bills whom), invoice numbering by series (tokens, the default series and series by client, when the number is given, a repeated printed number, cancel and reissue) and known limits: e-invoices take the seller from Settings and the buyer's tax details from the client.
 - Refreshed invoice create/lifecycle docs for two-step create, draft time links, Issued / Cancel and reissue, hours/costs layout, and legal entities ([INVOICE_FEATURE_README.md](docs/INVOICE_FEATURE_README.md), [GETTING_STARTED.md](docs/GETTING_STARTED.md), [FEATURES_COMPLETE.md](docs/FEATURES_COMPLETE.md)).
 - Invoice expenses and project costs guides now prefer step 1 + draft blocks; FAQ uses **Show hours as**.
 - REST API: from-time / layout, duration-only and preview create, bulk `set_project`/`set_task`, invoice cancel-with-payments, reports/expense-categories ([REST_API.md](docs/api/REST_API.md)).

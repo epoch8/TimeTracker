@@ -22,8 +22,8 @@ The Invoice Generation feature completes the billing workflow in TimeTracker: tu
 - **Project Invoices page** — `/projects/<id>/invoices` with New Invoice pre-filled for that project
 
 ### Legal entities and templates
-- **Seller legal entities** (`billing_entities` module) — Admin → Legal entities; invoice **From / Currency / Pay to**; entity defaults and number format
-- **Client legal entities** (`client_entities` module) — Client **Legal entities** card; invoice **Bill to** with buyer snapshot on the PDF
+- **Seller legal entities** (`billing_entities` module) — Admin → Legal entities; invoice **From / Currency / Pay to**; entity defaults; invoice numbering by series with a printed number (see [Legal entities](LEGAL_ENTITIES.md))
+- **Client legal entities** (`client_entities` module) — Client **Legal entities** card; invoice **Bill to** with buyer snapshot on the PDF (see [Legal entities](LEGAL_ENTITIES.md))
 - **Invoice templates** — Admin → **Invoice templates**: **HTML templates** (Jinja + WeasyPrint) and **Visual layout** (Konva designer). Settings (and each entity) pick the default; Visual remains default until changed
 
 ### Financial & delivery
@@ -73,7 +73,7 @@ See [REST API — Invoices](api/REST_API.md#invoices-credit-notes-and-payments).
 
 - **Currency** — Global setting plus per-invoice (and Pay to account) currency
 - **Rounding** — Entry hours rounded to 2 places before line totals
-- **Number format** — Per legal entity or Settings
+- **Number format** — Settings, or the legal entity's number series: the number is given when the invoice is issued, and **Printed as** is what the client sees ([Legal entities](LEGAL_ENTITIES.md#invoice-numbering))
 - **Default template** — Settings → Invoice Defaults; entity override when `billing_entities` is on
 
 ## Recurring invoices, reminders, and e-invoicing

@@ -487,8 +487,9 @@ TimeTracker is a comprehensive, self-hosted time tracking and project management
 - E-invoice embeds where configured (Factur-X / ZUGFeRD, etc.)
 
 #### 45a. **Legal entities**
-- **Seller** (`billing_entities`): Admin → Legal entities; From / Pay to; number format and invoice defaults
+- **Seller** (`billing_entities`): Admin → Legal entities; From / Pay to; invoice defaults; number series per client with a printed number, given when the invoice is issued
 - **Buyer** (`client_entities`): client Legal entities card; Bill to + buyer snapshot on PDF
+- Guide: [Legal entities](LEGAL_ENTITIES.md)
 
 #### 46. **Invoice Status Management**
 - Status workflow (Draft → **Issued** → Sent → Paid / Overdue; Cancelled)
