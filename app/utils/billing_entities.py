@@ -1000,13 +1000,26 @@ def numbering_before_flush(session):
             # No series to number from: a DRAFT-… that leaves draft would reach the client as it is
             if any(_leaving_draft(invoice) == "placeholder" for invoice in leaving):
                 raise NumberNotAssigned()
-            return
+        else:
+            for invoice in leaving:
+                allocate_for_invoice(invoice, settings=settings)
         for invoice in leaving:
-            placeholder = is_draft_placeholder(invoice.invoice_number)
-            allocate_for_invoice(invoice, settings=settings)
-            if placeholder and invoice.id and invoice.client_id:
-                # The client was not told about the draft (DRAFT-…): it is told now, with the number
+            if invoice.id and invoice.client_id and invoice.billing_entity_id:
+                # The client was not told about the draft (see notify_on_issue): it is told now, with its number
                 session.info.setdefault(_NOTIFY_PENDING, []).append(invoice.id)
+
+
+def notify_on_issue(invoice):
+    """True when the client hears of this invoice when it is issued, not when it is created.
+
+    A draft from one of our legal entities may still be renumbered, edited or deleted, so the "new invoice"
+    notification waits for the issue: with DRAFT-…, a number set by hand or a number given at creation.
+    """
+    return bool(
+        invoice is not None
+        and (invoice.status or "draft") == "draft"
+        and (invoice.billing_entity_id or is_draft_placeholder(invoice.invoice_number))
+    )
 
 
 def numbering_after_commit(session):
@@ -1022,7 +1035,7 @@ def numbering_after_rollback(session):
 
 
 def send_issue_notifications():
-    """Notify clients about invoices issued from a DRAFT-… draft, after the commit that issued them.
+    """Notify clients about invoices issued from a draft of our legal entity, after the commit that issued them.
 
     Called when a request or an app context ends: the commit itself can't send (no SQL in
     ``after_commit``). Each invoice is checked again, so one rolled back to a savepoint is skipped.

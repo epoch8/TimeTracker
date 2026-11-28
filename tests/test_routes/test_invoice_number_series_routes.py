@@ -361,6 +361,30 @@ def test_step_one_set_number_now_and_printed_as(app, authenticated_client, proje
     assert (inv.invoice_number, inv.printed_number, inv.printed_number_edited) == ("CLIENTA-24", "A/24", True)
 
 
+def test_draft_with_number_set_now_notifies_the_client_when_issued(
+    app, authenticated_client, project, test_client, series
+):
+    from app.models.client_notification import ClientNotification
+
+    data = _step_one(
+        project,
+        test_client,
+        series.billing_entity,
+        number_set_now="1",
+        invoice_number="CLIENTA-24",
+        printed_number="24",
+    )
+    authenticated_client.post("/invoices/new", data=data)
+    inv = _newest()
+    assert inv.invoice_number == "CLIENTA-24"
+    assert ClientNotification.query.count() == 0  # the draft can still change or go away
+    db.session.add(InvoiceItem(invoice_id=inv.id, description="Work", quantity=1, unit_price=Decimal("100")))
+    inv.calculate_totals()
+    db.session.commit()
+    _mark_issued(authenticated_client, inv)
+    assert [n.title for n in ClientNotification.query.all()] == ["New Invoice: 24"]
+
+
 def test_step_one_set_number_now_taken_is_refused(app, authenticated_client, project, test_client, user, series):
     _issued(project, test_client, user, series.billing_entity, "CLIENTA-24")
     before = Invoice.query.count()

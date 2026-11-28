@@ -724,3 +724,57 @@ def test_numbering_error_texts_are_marked_for_translation():
     for error in (billing.IssueNumberError, billing.NumberJustTaken, billing.NumberNotAssigned):
         assert error.message in marked
     assert billing.DuplicatePrintedNumber.message in marked
+
+
+def _notices():
+    from app.models.client_notification import ClientNotification
+
+    return [n.title for n in ClientNotification.query.order_by(ClientNotification.id).all()]
+
+
+def _created(invoice):
+    from app.services.client_notification_service import ClientNotificationService
+
+    ClientNotificationService().notify_invoice_created(invoice.id, invoice.client_id)  # what the create routes call
+
+
+def test_draft_with_a_number_set_by_hand_notifies_when_issued(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity, number="CLIENTA-7")
+    draft.printed_number = "7"
+    db.session.commit()
+    _created(draft)
+    assert _notices() == []  # it can still be changed or deleted
+    _issue(draft)
+    billing.send_issue_notifications()
+    assert _notices() == ["New Invoice: 7"]
+
+
+def test_draft_with_an_old_number_notifies_when_issued(app, project, test_client, user, entity):
+    draft = _draft(project, test_client, user, entity, number="OLD-5")  # made before the entity had series
+    _created(draft)
+    _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    assert _notices() == []
+    _issue(draft)
+    billing.send_issue_notifications()
+    assert _notices() == [f"New Invoice: {draft.invoice_number}"]
+
+
+def test_deleted_draft_of_our_entity_notifies_nobody(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    draft = _draft(project, test_client, user, entity, number="CLIENTA-7")
+    _created(draft)
+    db.session.delete(draft)
+    db.session.commit()
+    billing.send_issue_notifications()
+    assert _notices() == []
+
+
+def test_without_our_entity_a_draft_notifies_when_created(app, project, test_client, user):
+    _disable("billing_entities")
+    draft = _draft(project, test_client, user, number="INV-1")
+    _created(draft)
+    assert _notices() == ["New Invoice: INV-1"]  # as before the series
+    _issue(draft)
+    billing.send_issue_notifications()
+    assert _notices() == ["New Invoice: INV-1"]  # and not again
