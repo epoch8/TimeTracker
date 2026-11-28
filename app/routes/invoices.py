@@ -2676,7 +2676,7 @@ def _bulk_number_error_text(invoice, error):
     name = _("draft %(id)s", id=invoice.id) if invoice is not None else ""
     if isinstance(error, DuplicatePrintedNumber):
         return _("%(invoice)s: No. %(number)s is already used for this client", invoice=name, number=error.printed)
-    return _("%(invoice)s: %(reason)s", invoice=name, reason=_(error.message))
+    return _("%(invoice)s: %(reason)s", invoice=name, reason=error.text())
 
 
 @invoices_bp.route("/invoices/<int:invoice_id>/generate-from-time", methods=["GET", "POST"])

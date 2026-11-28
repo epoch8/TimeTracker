@@ -683,27 +683,44 @@ def set_last_seq(series, year, value):
 # --- errors when an invoice is issued ----------------------------------------------------------------
 
 
+def N_(text):
+    """Marks a text for extraction (a Babel default keyword); it is translated where it is shown."""
+    return text
+
+
+def _translate(text):
+    try:
+        from flask_babel import gettext
+
+        return gettext(text)
+    except Exception:  # no app or request context: the English text
+        return text
+
+
 class IssueNumberError(Exception):
     """The invoice could not get its number when it was issued. Its status change is rolled back.
 
-    ``message`` is a fixed text for the user; the exception text is never shown.
+    ``message`` is a fixed text for the user (``text()`` translated); the exception text is never shown.
     """
 
     code = "number_error"
-    message = "The invoice number could not be assigned"
+    message = N_("The invoice number could not be assigned")
+
+    def text(self):
+        return _translate(self.message)
 
     def payload(self):
-        return {"error": self.code, "message": self.message}
+        return {"error": self.code, "message": self.text()}
 
 
 class NumberJustTaken(IssueNumberError):
     code = "number_just_taken"
-    message = "This number was just taken, try again"
+    message = N_("This number was just taken, try again")
 
 
 class NumberNotAssigned(IssueNumberError):
     code = "number_not_assigned"
-    message = "The invoice has no number yet: issue it with Mark as issued first"
+    message = N_("The invoice has no number yet: issue it with Mark as issued first")
 
 
 class DuplicatePrintedNumber(IssueNumberError):
@@ -713,7 +730,7 @@ class DuplicatePrintedNumber(IssueNumberError):
     """
 
     code = "duplicate_printed_number"
-    message = "This printed number is already used for this client"
+    message = N_("This printed number is already used for this client")
 
     def __init__(self, printed, number, other):
         super().__init__(printed)
@@ -726,7 +743,7 @@ class DuplicatePrintedNumber(IssueNumberError):
     def payload(self):
         return {
             "error": self.code,
-            "message": self.message,
+            "message": self.text(),
             "printed_number": self.printed,
             "invoice_number": self.number,
             "duplicate_of": {
@@ -1044,17 +1061,17 @@ def numbering_after_flush(session):
 
 
 def _number_holder(number, invoice_id, state):
-    """(id, number) of the invoice holding ``number``, or None; numbers given earlier in this flush count."""
+    """(id, number, status) of the invoice holding ``number``, or None; numbers given in this flush count."""
     from app.models import Invoice
 
     if number in state["numbers"]:
-        return (None, number)
+        return (None, number, None)
     row = (
         db.session.query(Invoice.id, Invoice.status)
         .filter(Invoice.invoice_number == number, Invoice.id != (invoice_id or 0))
         .first()
     )
-    return (row.id, number) if row else None
+    return (row.id, number, row.status) if row else None
 
 
 def _replace_number_copies(old, new):
@@ -1248,7 +1265,7 @@ def flush_status_change(rollback=True):
     Returns None, or the IssueNumberError after rolling back (``rollback=False``: the caller rolls
     back its savepoint). A unique-number clash with another series' number is NumberJustTaken.
     """
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.exc import IntegrityError, OperationalError
 
     try:
         db.session.flush()
@@ -1262,17 +1279,34 @@ def flush_status_change(rollback=True):
         if rollback:
             db.session.rollback()
         return NumberJustTaken()
+    except OperationalError as exc:
+        # SQLite: another writer holds the database while the invoice row is written ("database is locked")
+        if "database is locked" not in str(getattr(exc, "orig", "") or ""):
+            raise
+        if rollback:
+            db.session.rollback()
+        return NumberJustTaken()
     return None
 
 
 def issue_error_text(error):
     """The fixed text of a numbering error on a path with no dialog (a payment on a draft, Peppol, SDI)."""
     if isinstance(error, DuplicatePrintedNumber):
-        return (
-            f"No. {error.printed} is already used for this client (invoice {error.other_number}): "
-            "issue the invoice with Mark as issued first"
-        )
-    return error.message
+        try:
+            from flask_babel import gettext
+
+            return gettext(
+                "No. %(printed)s is already used for this client (invoice %(invoice)s): "
+                "issue the invoice with Mark as issued first",
+                printed=error.printed,
+                invoice=error.other_number,
+            )
+        except Exception:
+            return (
+                f"No. {error.printed} is already used for this client (invoice {error.other_number}): "
+                "issue the invoice with Mark as issued first"
+            )
+    return error.text()
 
 
 def number_before_sending(invoice):
@@ -1298,12 +1332,15 @@ def numbering_message(invoice):
     if not result:
         return None
     text = _("Issued as %(number)s (No. %(printed)s).", number=result["number"], printed=result["printed"])
-    if result.get("held_by"):
+    held = result.get("held_by")
+    if held and held[2] == "draft":
         text += " " + _(
             "%(number)s is held by draft %(draft)s, which has that number set by hand.",
-            number=result["held_by"][1],
-            draft=result["held_by"][0],
+            number=held[1],
+            draft=held[0],
         )
+    elif held:
+        text += " " + _("%(number)s is already used by invoice %(invoice)s.", number=held[1], invoice=held[0])
     elif result.get("draft_said"):
         text += " " + _(
             "The draft said %(expected)s, but %(expected)s was issued first from another draft.",

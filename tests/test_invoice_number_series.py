@@ -173,7 +173,7 @@ def test_number_held_by_draft_set_by_hand_is_skipped(app, project, test_client, 
     inv = _draft(project, test_client, user, entity)
     _issue(inv)
     assert inv.invoice_number == "CLIENTA-26"
-    assert inv._numbering_result["held_by"] == (held.id, "CLIENTA-25")
+    assert inv._numbering_result["held_by"] == (held.id, "CLIENTA-25", "draft")
     message = billing.numbering_message(inv)
     assert f"CLIENTA-25 is held by draft {held.id}" in message
     # the held number is issued by its own draft; the counter only moves forward
@@ -612,6 +612,65 @@ def test_a_failed_flush_leaves_no_number_behind(app, project, test_client, user,
 # --- notices, list previews, Next {SEQ} and texts ---------------------------------------------------
 
 
+def test_next_seq_can_not_go_below_the_last_number_given(app, project, test_client, user, entity):
+    series = _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    first = _draft(project, test_client, user, entity)
+    _issue(first)
+    third = _draft(project, test_client, user, entity, number="CLIENTA-3")
+    _issue(third)
+    assert (first.invoice_number, third.invoice_number) == ("CLIENTA-1", "CLIENTA-3")
+    # 2 is a gap below the last number given: Next can't go back into it
+    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 2})
+    assert [(e["field"], e["use"]) for e in errors] == [("next_seq_0", 4)]
+    assert "above 3" in errors[0]["message"]
+    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 4})
+    assert errors == []
+
+
+def test_draft_placeholder_is_not_issued_with_the_module_off(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    draft = _draft(project, test_client, user, entity)
+    assert billing.is_draft_placeholder(draft.invoice_number)
+    _disable("billing_entities")
+    draft.status = "sent"  # a path that skips the Settings number
+    with pytest.raises(billing.NumberNotAssigned):
+        db.session.flush()
+    db.session.rollback()
+    assert db.session.get(Invoice, draft.id).status == "draft"
+
+
+def test_number_used_by_an_issued_invoice_of_another_series_is_named_so(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, next_seq=25)
+    other = BillingEntity(short_name="Other Ltd", legal_name="OTHER LTD")
+    db.session.add(other)
+    db.session.commit()
+    _series(other, "OTHER-{SEQ}")
+    taken = _draft(project, test_client, user, other, number="CLIENTA-25")
+    _issue(taken)
+    inv = _draft(project, test_client, user, entity)
+    _issue(inv)
+    assert inv.invoice_number == "CLIENTA-26"
+    message = billing.numbering_message(inv)
+    assert f"CLIENTA-25 is already used by invoice {taken.id}" in message
+    assert "held by draft" not in message
+
+
+def test_client_is_told_about_a_series_draft_when_it_is_issued(app, project, test_client, user, entity):
+    from app.models.client_notification import ClientNotification
+    from app.services.client_notification_service import ClientNotificationService
+
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    ClientNotificationService().notify_invoice_created(draft.id, test_client.id)
+    assert ClientNotification.query.count() == 0  # DRAFT-…: nothing goes to the client yet
+    _issue(draft)
+    billing.send_issue_notifications()  # what the end of the request does
+    notices = ClientNotification.query.all()
+    assert [n.title for n in notices] == ["New Invoice: 20"]
+    billing.send_issue_notifications()
+    assert ClientNotification.query.count() == 1  # once
+
+
 def test_list_preview_costs_the_same_for_ten_drafts(app, project, test_client, user, entity):
     from sqlalchemy import event
 
@@ -640,44 +699,28 @@ def test_list_preview_costs_the_same_for_ten_drafts(app, project, test_client, u
     assert queries_ten == queries_one
 
 
-def test_next_seq_can_not_go_below_the_last_number_given(app, project, test_client, user, entity):
-    series = _series(entity, "CLIENTA-{SEQ}", client=test_client)
-    first = _draft(project, test_client, user, entity)
-    _issue(first)
-    third = _draft(project, test_client, user, entity, number="CLIENTA-3")
-    _issue(third)
-    assert (first.invoice_number, third.invoice_number) == ("CLIENTA-1", "CLIENTA-3")
-    # 2 is a gap below the last number given: Next can't go back into it
-    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 2})
-    assert [(e["field"], e["use"]) for e in errors] == [("next_seq_0", 4)]
-    assert "above 3" in errors[0]["message"]
-    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 4})
-    assert errors == []
+def test_a_locked_sqlite_database_is_try_again(app, project, test_client, user, entity, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    def locked(*args, **kwargs):
+        raise OperationalError("UPDATE invoices", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(db.session, "flush", locked)
+    error = billing.flush_status_change()
+    assert isinstance(error, billing.NumberJustTaken)
+    assert error.payload()["message"] == "This number was just taken, try again"
 
 
-def test_draft_placeholder_is_not_issued_with_the_module_off(app, project, test_client, user, entity):
-    _series(entity, "CLIENTA-{SEQ}", client=test_client)
-    draft = _draft(project, test_client, user, entity)
-    assert billing.is_draft_placeholder(draft.invoice_number)
-    _disable("billing_entities")
-    draft.status = "sent"  # a path that skips the Settings number
-    with pytest.raises(billing.NumberNotAssigned):
-        db.session.flush()
-    db.session.rollback()
-    assert db.session.get(Invoice, draft.id).status == "draft"
+def test_numbering_error_texts_are_marked_for_translation():
+    import ast
+    import inspect
 
-
-def test_client_is_told_about_a_series_draft_when_it_is_issued(app, project, test_client, user, entity):
-    from app.models.client_notification import ClientNotification
-    from app.services.client_notification_service import ClientNotificationService
-
-    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
-    draft = _draft(project, test_client, user, entity)
-    ClientNotificationService().notify_invoice_created(draft.id, test_client.id)
-    assert ClientNotification.query.count() == 0  # DRAFT-…: nothing goes to the client yet
-    _issue(draft)
-    billing.send_issue_notifications()  # what the end of the request does
-    notices = ClientNotification.query.all()
-    assert [n.title for n in notices] == ["New Invoice: 20"]
-    billing.send_issue_notifications()
-    assert ClientNotification.query.count() == 1  # once
+    tree = ast.parse(inspect.getsource(billing))
+    marked = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "N_" and node.args
+    }
+    for error in (billing.IssueNumberError, billing.NumberJustTaken, billing.NumberNotAssigned):
+        assert error.message in marked
+    assert billing.DuplicatePrintedNumber.message in marked

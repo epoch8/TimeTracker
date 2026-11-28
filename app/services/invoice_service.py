@@ -475,7 +475,7 @@ class InvoiceService:
                 return {
                     "success": False,
                     "error": number_error.code,
-                    "message": number_error.message,
+                    "message": number_error.text(),
                     "number_error": number_error,
                     "previous_status": previous_status,
                     "status": previous_status,

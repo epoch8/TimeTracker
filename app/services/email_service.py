@@ -49,7 +49,7 @@ class EmailService:
 
         # Generate subject if not provided
         if not subject:
-            subject = f"Invoice {invoice.invoice_number} from {current_app.config.get('COMPANY_NAME', 'TimeTracker')}"
+            subject = f"Invoice {invoice.display_number} from {current_app.config.get('COMPANY_NAME', 'TimeTracker')}"
 
         # Render email template
         try:
@@ -58,7 +58,7 @@ class EmailService:
             # Fallback to simple text
             html_body = f"""
             <p>Dear {invoice.client_name},</p>
-            <p>Please find attached invoice {invoice.invoice_number}.</p>
+            <p>Please find attached invoice {invoice.display_number}.</p>
             <p>Total: {invoice.currency_code} {invoice.total_amount}</p>
             <p>Due Date: {invoice.due_date}</p>
             """
@@ -70,7 +70,7 @@ class EmailService:
             send_email(
                 subject=subject,
                 recipients=[recipient_email],
-                text_body=message or f"Invoice {invoice.invoice_number}",
+                text_body=message or f"Invoice {invoice.display_number}",
                 html_body=html_body,
                 attachments=[],  # PDF attachment would be added here
             )
