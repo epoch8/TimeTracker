@@ -1405,6 +1405,31 @@ def _taken_run(series, start, year, issue_date):
     return (first, last, seq) if first else None
 
 
+def max_given_seq(series, year, formats):
+    """The highest {SEQ} the series gave on an issued invoice (of ``year`` for a yearly counter), or 0.
+
+    ``formats``: series objects whose format may have made the numbers (the one typed and the one saved).
+    """
+    from app.models import Invoice
+
+    if series.id is None:
+        return 0
+    query = db.session.query(Invoice.invoice_number, Invoice.issue_date, Invoice.period_end).filter(
+        Invoice.number_series_id == series.id, Invoice.status != "draft"
+    )
+    best = 0
+    for number, issue_date, period in query.all():
+        issue_date = issue_date or default_issue_date()
+        if year and issue_date.year != year:
+            continue
+        for probe in formats:
+            seq = series_seq_of(probe, number, issue_date, period)
+            if seq is not None:
+                best = max(best, seq)
+                break
+    return best
+
+
 def has_issued_invoices(series):
     from app.models import Invoice
 
@@ -1534,6 +1559,17 @@ def check_series(series, number_format, printed_format, reset_yearly, next_seqs,
         if "{SEQ}" not in number_format or errors:
             continue
         issue_day = date(year, 6, 30) if year else (today or date.today())
+        # Next goes on after the last number given: it can't go back into a gap below it
+        given = max_given_seq(series, year, [probe] + ([series] if series.number_format else []))
+        if value <= given:
+            use = given + 1
+            run = _taken_run(probe, use, year, issue_day)
+            error(
+                f"next_seq_{year}",
+                _("Next {SEQ} must be above %(seq)s, the last number given in this series.", seq=given),
+                use=run[2] if run else use,
+            )
+            continue
         run = _taken_run(probe, value, year, issue_day)
         if run:
             first, last, free = run

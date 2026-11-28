@@ -638,3 +638,18 @@ def test_list_preview_costs_the_same_for_ten_drafts(app, project, test_client, u
     ten, queries_ten = count(drafts)
     assert one == ["CLIENTA-20"] and set(ten) == {"CLIENTA-20"}
     assert queries_ten == queries_one
+
+
+def test_next_seq_can_not_go_below_the_last_number_given(app, project, test_client, user, entity):
+    series = _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    first = _draft(project, test_client, user, entity)
+    _issue(first)
+    third = _draft(project, test_client, user, entity, number="CLIENTA-3")
+    _issue(third)
+    assert (first.invoice_number, third.invoice_number) == ("CLIENTA-1", "CLIENTA-3")
+    # 2 is a gap below the last number given: Next can't go back into it
+    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 2})
+    assert [(e["field"], e["use"]) for e in errors] == [("next_seq_0", 4)]
+    assert "above 3" in errors[0]["message"]
+    errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 4})
+    assert errors == []

@@ -388,7 +388,10 @@ def _posted_next_seqs(years):
 
 def _flash_checks(errors, warnings):
     for item in errors:
-        flash(item["message"], "error")
+        message = item["message"]
+        if item.get("use"):
+            message = f"{message} {_('Use %(number)s.', number=item['use'])}"
+        flash(message, "error")
     for item in warnings:
         flash(item["message"], "warning")
 

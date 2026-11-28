@@ -568,7 +568,17 @@ def test_series_form_errors(app, admin_authenticated_client, project, test_clien
         data={"client_id": test_client.id, "number_format": "CLIENTA-{SEQ}", "next_seq_0": "20"},
     )
     page = resp.get_data(as_text=True)
-    assert "CLIENTA-20 to CLIENTA-21 are already taken." in page and "Use 22" in page
+    # Next can't go back below the last number given ...
+    assert "Next {SEQ} must be above 21, the last number given in this series." in page and "Use 22" in page
+    # ... nor onto numbers that drafts hold
+    _draft(project, test_client, user, series.billing_entity, number="CLIENTA-22")
+    _draft(project, test_client, user, series.billing_entity, number="CLIENTA-23")
+    resp = admin_authenticated_client.post(
+        f"/admin/legal-entities/{series.billing_entity_id}/series/{series.id}",
+        data={"client_id": test_client.id, "number_format": "CLIENTA-{SEQ}", "next_seq_0": "22"},
+    )
+    page = resp.get_data(as_text=True)
+    assert "CLIENTA-22 to CLIENTA-23 are already taken." in page and "Use 24" in page
 
     resp = admin_authenticated_client.post(
         f"/admin/legal-entities/{series.billing_entity_id}/series/new",
