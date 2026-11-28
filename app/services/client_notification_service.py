@@ -97,6 +97,11 @@ class ClientNotificationService:
         invoice = Invoice.query.get(invoice_id)
         if not invoice:
             return
+        from app.utils.billing_entities import is_draft_placeholder
+
+        if is_draft_placeholder(invoice.invoice_number):
+            # A draft without its number yet: the client is told when it is issued
+            return
 
         notification = self.create_notification(
             client_id=client_id,

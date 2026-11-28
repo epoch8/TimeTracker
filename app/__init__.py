@@ -347,6 +347,21 @@ def create_app(config=None):
 
     # Initialize extensions
     db.init_app(app)
+
+    # Clients of invoices issued from a DRAFT-… draft are notified once the issue is committed. Registered
+    # after db.init_app: teardown runs in reverse, so the session is still there.
+    from app.utils.billing_entities import send_issue_notifications
+
+    @app.teardown_request
+    def _notify_issued_invoices(exc=None):
+        if exc is None:
+            send_issue_notifications()
+
+    @app.teardown_appcontext
+    def _notify_issued_invoices_outside_requests(exc=None):
+        if exc is None:
+            send_issue_notifications()
+
     migrate.init_app(app, db)
     login_manager.init_app(app)
     # Socket.IO: never "*". Allowlist + same-host (callable re-checked per request).

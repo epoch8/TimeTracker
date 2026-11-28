@@ -7,10 +7,13 @@
 """
 
 import html
+import logging
 import re
 from datetime import date
 
 from app import db
+
+logger = logging.getLogger(__name__)
 
 MODULE_ID = "billing_entities"
 _TOKEN = re.compile(r"\{(YYYY|YY|MM|DD|SEQ)\}")
@@ -419,6 +422,10 @@ def seller_settings_for(invoice, settings):
 # invoice leaves draft, in a ``before_flush`` hook, so every path that changes the status gets it and a
 # deleted draft leaves no gap. An entity with no series at all keeps the entity's own number format,
 # given when the draft is created (as before series existed).
+
+# session.info keys: drafts issued in the open transaction / in committed ones, to notify their client
+_NOTIFY_PENDING = "invoice_numbering_notify"
+_NOTIFY_READY = "invoice_numbering_notify_ready"
 
 DRAFT_PREFIX = "DRAFT-"
 CLIENT_ENTITIES_MODULE_ID = "client_entities"
@@ -964,16 +971,66 @@ def numbering_before_flush(session):
             continue
         if obj in session.new and getattr(obj, "_draft_placeholder_pending", False):
             session.info.setdefault("invoice_drafts_to_name", []).append(obj)
-        if obj.billing_entity_id and _leaving_draft(obj):
+        if (obj.billing_entity_id or is_draft_placeholder(obj.invoice_number)) and _leaving_draft(obj):
             leaving.append(obj)
     if not leaving:
         return
     with session.no_autoflush:
         settings = _numbering_settings()
         if not numbering_on(settings):
+            # No series to number from: a DRAFT-… that leaves draft would reach the client as it is
+            if any(_leaving_draft(invoice) == "placeholder" for invoice in leaving):
+                raise NumberNotAssigned()
             return
         for invoice in leaving:
+            placeholder = is_draft_placeholder(invoice.invoice_number)
             allocate_for_invoice(invoice, settings=settings)
+            if placeholder and invoice.id and invoice.client_id:
+                # The client was not told about the draft (DRAFT-…): it is told now, with the number
+                session.info.setdefault(_NOTIFY_PENDING, []).append(invoice.id)
+
+
+def numbering_after_commit(session):
+    """``after_commit``: the issued drafts of this transaction wait for ``send_issue_notifications``."""
+    pending = session.info.pop(_NOTIFY_PENDING, None)
+    if pending:
+        session.info.setdefault(_NOTIFY_READY, []).extend(pending)
+
+
+def numbering_after_rollback(session):
+    """``after_rollback``: nothing was issued."""
+    session.info.pop(_NOTIFY_PENDING, None)
+
+
+def send_issue_notifications():
+    """Notify clients about invoices issued from a DRAFT-… draft, after the commit that issued them.
+
+    Called when a request or an app context ends: the commit itself can't send (no SQL in
+    ``after_commit``). Each invoice is checked again, so one rolled back to a savepoint is skipped.
+    """
+    if not db.session.registry.has():
+        return
+    session = db.session()
+    ready = session.info.pop(_NOTIFY_READY, None)
+    if not ready:
+        return
+    from app.models import Invoice
+    from app.services.client_notification_service import ClientNotificationService
+
+    if session.new or session.dirty or session.deleted:
+        # Changes nobody committed are dropped when the request ends anyway; the notice must not commit them
+        session.rollback()
+    for invoice_id in dict.fromkeys(ready):
+        try:
+            invoice = db.session.get(Invoice, invoice_id)
+            if invoice is None or not invoice.client_id or invoice.status in _NOT_ISSUED:
+                continue
+            if is_draft_placeholder(invoice.invoice_number):
+                continue
+            ClientNotificationService().notify_invoice_created(invoice.id, invoice.client_id)
+        except Exception:
+            logger.exception("Could not notify the client about issued invoice %s", invoice_id)
+            db.session.rollback()
 
 
 def numbering_after_flush(session):
@@ -1042,10 +1099,16 @@ def allocate_for_invoice(invoice, settings=None):
     from app.models import BillingEntityNumberSeries
 
     kind = _leaving_draft(invoice)
-    if kind is None or not invoice.billing_entity_id:
+    if kind is None:
+        return None
+    if not invoice.billing_entity_id:
+        if kind == "placeholder":
+            raise NumberNotAssigned()
         return None
     settings = settings if settings is not None else _numbering_settings()
     if not numbering_on(settings):
+        if kind == "placeholder":
+            raise NumberNotAssigned()
         return None
     if not entity_has_series(invoice.billing_entity_id):
         if kind == "placeholder":

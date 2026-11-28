@@ -148,6 +148,21 @@ def _name_new_drafts(session, flush_context):
     numbering_after_flush(session)
 
 
+@event.listens_for(Session, "after_commit")
+def _issued_drafts_committed(session):
+    """Drafts that got their number in this transaction: their client is notified once it is committed."""
+    from app.utils.billing_entities import numbering_after_commit
+
+    numbering_after_commit(session)
+
+
+@event.listens_for(Session, "after_rollback")
+def _issued_drafts_rolled_back(session):
+    from app.utils.billing_entities import numbering_after_rollback
+
+    numbering_after_rollback(session)
+
+
 def _listen_to_invoice_status():
     from app.models.invoice import Invoice
 

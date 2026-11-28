@@ -326,6 +326,7 @@ def create_invoice():
         if not safe_commit("create_invoice", {"invoice_number": invoice_number, "project_id": project_id}):
             flash(_("Could not create invoice due to a database error. Please check server logs."), "error")
             return render_template("invoices/create.html")
+        invoice_number = invoice.invoice_number  # a series draft is DRAFT-<id> once it has an id
 
         from app.telemetry.otel_setup import business_span, record_invoice_created, record_invoice_duration_seconds
 

@@ -370,7 +370,28 @@ def test_old_create_form_makes_a_placeholder_draft(app, authenticated_client, pr
             "invoice_number": "ignored-without-set-now",
         },
     )
-    assert _newest().invoice_number.startswith("DRAFT-")
+    inv = _newest()
+    assert inv.invoice_number == f"DRAFT-{inv.id}"
+    with authenticated_client.session_transaction() as flask_session:
+        flashes = [text for _, text in flask_session.get("_flashes", [])]
+    assert f"Invoice DRAFT-{inv.id} created successfully" in flashes  # not the DRAFT-<random> before the commit
+
+
+def test_client_is_notified_when_issued_not_when_the_draft_is_made(
+    app, authenticated_client, project, test_client, series
+):
+    from app.models.client_notification import ClientNotification
+
+    authenticated_client.post("/invoices/new", data=_step_one(project, test_client, series.billing_entity))
+    inv = _newest()
+    assert inv.invoice_number.startswith("DRAFT-")
+    assert ClientNotification.query.count() == 0
+    db.session.add(InvoiceItem(invoice_id=inv.id, description="Work", quantity=1, unit_price=Decimal("100")))
+    inv.calculate_totals()
+    db.session.commit()
+    resp = _mark_issued(authenticated_client, inv)
+    assert resp.status_code in (200, 302)
+    assert [n.title for n in ClientNotification.query.all()] == ["New Invoice: 20"]
 
 
 def test_draft_step_one_assign_from_series_and_gap_warning(

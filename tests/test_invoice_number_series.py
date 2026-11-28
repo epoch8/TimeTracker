@@ -653,3 +653,31 @@ def test_next_seq_can_not_go_below_the_last_number_given(app, project, test_clie
     assert "above 3" in errors[0]["message"]
     errors, _ = billing.check_series(series, "CLIENTA-{SEQ}", "{NUMBER}", False, {0: 4})
     assert errors == []
+
+
+def test_draft_placeholder_is_not_issued_with_the_module_off(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client)
+    draft = _draft(project, test_client, user, entity)
+    assert billing.is_draft_placeholder(draft.invoice_number)
+    _disable("billing_entities")
+    draft.status = "sent"  # a path that skips the Settings number
+    with pytest.raises(billing.NumberNotAssigned):
+        db.session.flush()
+    db.session.rollback()
+    assert db.session.get(Invoice, draft.id).status == "draft"
+
+
+def test_client_is_told_about_a_series_draft_when_it_is_issued(app, project, test_client, user, entity):
+    from app.models.client_notification import ClientNotification
+    from app.services.client_notification_service import ClientNotificationService
+
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    ClientNotificationService().notify_invoice_created(draft.id, test_client.id)
+    assert ClientNotification.query.count() == 0  # DRAFT-…: nothing goes to the client yet
+    _issue(draft)
+    billing.send_issue_notifications()  # what the end of the request does
+    notices = ClientNotification.query.all()
+    assert [n.title for n in notices] == ["New Invoice: 20"]
+    billing.send_issue_notifications()
+    assert ClientNotification.query.count() == 1  # once
