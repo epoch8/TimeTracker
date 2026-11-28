@@ -78,6 +78,12 @@ def engine():
         sa.Column("billing_entity_id", sa.Integer, sa.ForeignKey("billing_entities.id")),
     )
     sa.Table(
+        "invoice_templates",
+        meta,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("html", sa.Text),
+    )
+    sa.Table(
         "invoice_html_templates",
         meta,
         sa.Column("id", sa.Integer, primary_key=True),
@@ -102,6 +108,7 @@ def engine():
         meta,
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("invoice_pdf_template_html", sa.Text),
+        sa.Column("invoice_pdf_design_json", sa.Text),
     )
     _drop_new_tables(engine)
     meta.drop_all(engine)
@@ -137,7 +144,13 @@ def engine():
             )
         )
         conn.execute(
-            sa.text("INSERT INTO settings (id, invoice_pdf_template_html) VALUES (1, '#{{ invoice.invoice_number }}')")
+            sa.text(
+                "INSERT INTO settings (id, invoice_pdf_template_html, invoice_pdf_design_json) VALUES "
+                "(1, '#{{ invoice.invoice_number }}', '{\"text\": \"{{ invoice.invoice_number }}\"}')"
+            )
+        )
+        conn.execute(
+            sa.text("INSERT INTO invoice_templates (id, html) VALUES (1, 'Invoice {{ invoice.invoice_number }}')")
         )
     yield engine
     _drop_new_tables(engine)
@@ -190,6 +203,12 @@ def test_upgrade_makes_default_series_and_links_issued_invoices(engine):
         assert conn.execute(sa.text("SELECT invoice_pdf_template_html FROM settings")).scalar() == (
             "#{{ invoice.display_number }}"
         )
+        assert (
+            "invoice.display_number" in conn.execute(sa.text("SELECT invoice_pdf_design_json FROM settings")).scalar()
+        )
+        assert conn.execute(sa.text("SELECT html FROM invoice_templates")).scalar() == (
+            "Invoice {{ invoice.display_number }}"
+        )
 
 
 def test_one_active_default_series_per_entity(engine):
@@ -238,7 +257,7 @@ def test_downgrade_restores_format_counter_and_templates(engine):
         conn.execute(
             sa.text(
                 "INSERT INTO billing_entity_number_counters (series_id, year, last_seq) VALUES (:s, 2026, 7), "
-                "(:s, 2027, 2)"
+                "(:s, 2027, 2), (:s, 2028, 0)"
             ),
             {"s": series_id},
         )
@@ -250,9 +269,16 @@ def test_downgrade_restores_format_counter_and_templates(engine):
         rows = conn.execute(
             sa.text("SELECT id, number_format, number_counter FROM billing_entities ORDER BY id")
         ).fetchall()
+        # The counter of the latest year with a number given: the next year's row (0) does not reset it
         assert [tuple(r) for r in rows] == [(1, "ACME-{YYYY}-{SEQ}", 2), (2, "OLD-{SEQ}", 3), (3, None, 0)]
         assert conn.execute(sa.text("SELECT html FROM invoice_html_templates")).scalar() == (
             "<h1>{{ invoice.invoice_number }}</h1>"
+        )
+        assert conn.execute(sa.text("SELECT html FROM invoice_templates")).scalar() == (
+            "Invoice {{ invoice.invoice_number }}"
+        )
+        assert conn.execute(sa.text("SELECT invoice_pdf_design_json FROM settings")).scalar() == (
+            '{"text": "{{ invoice.invoice_number }}"}'
         )
 
 

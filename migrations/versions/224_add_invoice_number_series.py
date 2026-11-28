@@ -33,10 +33,11 @@ _TOKEN = re.compile(r"\{(YYYY|YY|MM|DD|SEQ)\}")
 
 # (table, text columns) of the invoice templates whose text names the invoice number
 TEMPLATE_COLUMNS = (
+    ("invoice_templates", ("html",)),
     ("invoice_html_templates", ("html",)),
     ("invoice_html_template_versions", ("html",)),
     ("invoice_pdf_templates", ("template_html", "template_json", "design_json")),
-    ("settings", ("invoice_pdf_template_html",)),
+    ("settings", ("invoice_pdf_template_html", "invoice_pdf_design_json")),
 )
 
 
@@ -127,16 +128,16 @@ def upgrade():
             sa.Column(
                 "series_id",
                 sa.Integer(),
-                sa.ForeignKey("billing_entity_number_series.id", name="fk_number_counters_series_id", ondelete="CASCADE"),
+                sa.ForeignKey(
+                    "billing_entity_number_series.id", name="fk_number_counters_series_id", ondelete="CASCADE"
+                ),
                 nullable=False,
             ),
             sa.Column("year", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("last_seq", sa.Integer(), nullable=False, server_default="0"),
             sa.UniqueConstraint("series_id", "year", name="uq_number_counters_series_year"),
         )
-        op.create_index(
-            "ix_billing_entity_number_counters_series_id", "billing_entity_number_counters", ["series_id"]
-        )
+        op.create_index("ix_billing_entity_number_counters_series_id", "billing_entity_number_counters", ["series_id"])
 
     inspector = inspect(bind)
     existing = _columns(inspector, "invoices")
@@ -266,7 +267,7 @@ def downgrade():
 
 
 def _restore_entity_formats(bind):
-    """The entity's format and counter again from its default series (the counter of its latest year)."""
+    """The entity's format and counter again from its default series (its latest year with a number given)."""
     rows = bind.execute(
         sa.text(
             "SELECT s.billing_entity_id, s.number_format, s.id FROM billing_entity_number_series s "
@@ -280,7 +281,8 @@ def _restore_entity_formats(bind):
         seen.add(entity_id)
         last = bind.execute(
             sa.text(
-                "SELECT last_seq FROM billing_entity_number_counters WHERE series_id = :s ORDER BY year DESC LIMIT 1"
+                "SELECT last_seq FROM billing_entity_number_counters WHERE series_id = :s AND last_seq > 0 "
+                "ORDER BY year DESC LIMIT 1"
             ),
             {"s": series_id},
         ).scalar()
