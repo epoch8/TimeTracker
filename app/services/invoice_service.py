@@ -373,11 +373,20 @@ class InvoiceService:
         actor_id: Optional[int] = None,
         payment_reference: Optional[str] = None,
         force: bool = False,
+        confirm_duplicate_printed: Optional[str] = None,
+        rollback_on_number_error: bool = True,
     ) -> Dict[str, Any]:
         """
         Apply an allowed invoice status change and its side effects.
 
         Does not commit — callers own the transaction boundary.
+        Leaving draft gives the invoice its number when its legal entity numbers by series (the
+        ``before_flush`` hook in ``app.utils.billing_entities``). The session is flushed right after the
+        status changes so a numbering error comes back here: ``success`` False, ``error``
+        ``duplicate_printed_number`` (or another numbering code), ``number_error`` the exception; the session
+        is rolled back (``rollback_on_number_error=False``: the caller rolls back its savepoint).
+        ``confirm_duplicate_printed``: the printed number the person agreed to issue although the client
+        already has it.
         When *force* is True (e.g. full credit note cancel), skip the transition
         map but still apply side effects. Reverting a finalized invoice to
         draft/issued is never allowed, even with force.
@@ -443,11 +452,35 @@ class InvoiceService:
                     "status": previous_status,
                 }
 
+        from app.utils import billing_entities as billing
+
+        issuing = prev == "draft" and new_status not in ("draft", "cancelled")
+        if issuing:
+            if confirm_duplicate_printed:
+                billing.set_confirmed_repeat(invoice, confirm_duplicate_printed)
+            # A DRAFT-… draft no series numbers any more (the module was switched off): Settings number now
+            billing.give_settings_number(invoice, new_status)
+
         # Freeze buyer contact details from the live client when leaving draft (PDF/email/e-invoice).
         if prev == "draft" and new_status != "draft":
             invoice.sync_client_snapshot_from_client()
 
         invoice.status = new_status
+
+        if issuing and invoice.billing_entity_id and billing.numbering_on():
+            number_error = billing.flush_status_change(rollback=rollback_on_number_error)
+            if number_error is not None:
+                if not rollback_on_number_error:
+                    invoice.status = previous_status
+                return {
+                    "success": False,
+                    "error": number_error.code,
+                    "message": number_error.message,
+                    "number_error": number_error,
+                    "previous_status": previous_status,
+                    "status": previous_status,
+                }
+            self._log_repeated_printed_number(invoice, actor_id)
 
         try:
             InvoiceTimeService().on_status_change(invoice, previous_status)
@@ -494,6 +527,56 @@ class InvoiceService:
             "warnings": warnings,
             "invoice": invoice,
         }
+
+    def issue_before_sending(
+        self, invoice: Invoice, actor_id: Optional[int] = None, confirm_duplicate_printed: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Issue a draft that is about to be sent and commit its number, before the PDF or e-invoice is built.
+
+        Only for a draft its legal entity's series numbers (or one with a DRAFT- number): the email,
+        Peppol and SDI then carry the real number, and a failed send leaves it issued with that number.
+        Returns None when there is nothing to do or it worked, else the failed ``transition_status`` result.
+        """
+        from app.utils import billing_entities as billing
+
+        if not billing.number_before_sending(invoice):
+            return None
+        result = self.transition_status(
+            invoice, "issued", actor_id=actor_id, confirm_duplicate_printed=confirm_duplicate_printed
+        )
+        if not result.get("success"):
+            return result
+        if not safe_commit("issue_invoice_before_sending", {"invoice_id": invoice.id}):
+            return {
+                "success": False,
+                "error": "database_error",
+                "message": "Could not issue the invoice due to a database error",
+            }
+        return None
+
+    @staticmethod
+    def _log_repeated_printed_number(invoice: Invoice, actor_id: Optional[int]) -> None:
+        """Issued although the client already has this printed number: the person confirmed it; say who."""
+        result = getattr(invoice, "_numbering_result", None) or {}
+        repeated = result.get("repeated")
+        if not repeated:
+            return
+        from app.models import User
+        from app.models.audit_log import AuditLog
+
+        user = db.session.get(User, actor_id) if actor_id else None
+        who = (getattr(user, "display_name", None) or getattr(user, "username", None) or "") if user else ""
+        AuditLog.log_change(
+            user_id=actor_id,
+            action="updated",
+            entity_type="Invoice",
+            entity_id=invoice.id,
+            field_name="printed_number",
+            new_value=result.get("printed"),
+            entity_name=invoice.invoice_number,
+            change_description=f"Printed number repeated, confirmed by {who or 'unknown user'}",
+            entity_metadata={"repeats_invoice_id": repeated.get("id"), "repeats_invoice": repeated.get("number")},
+        )
 
     def _reduce_stock_for_invoice(self, invoice: Invoice, *, actor_id: Optional[int] = None) -> List[str]:
         """Reduce inventory for stock line items and extra goods. Returns warning messages."""
@@ -636,6 +719,11 @@ class InvoiceService:
 
         if not invoice:
             return {"success": False, "message": "Invoice not found", "error": "not_found"}
+        from app.utils import billing_entities as billing
+
+        number_error = billing.flush_status_change()
+        if number_error is not None:
+            return {"success": False, "message": billing.issue_error_text(number_error), "error": number_error.code}
 
         if not safe_commit("mark_invoice_paid", {"invoice_id": invoice_id}):
             return {
@@ -833,6 +921,7 @@ class InvoiceService:
             query = query.outerjoin(Client, Invoice.client_id == Client.id).filter(
                 db.or_(
                     Invoice.invoice_number.ilike(like),
+                    Invoice.printed_number.ilike(like),
                     Invoice.client_name.ilike(like),
                     Client.name.ilike(like),
                 )

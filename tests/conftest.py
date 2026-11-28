@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from app import create_app, db, limiter
@@ -60,6 +61,28 @@ def _disable_fk_for_drop(conn, cursor, statement, parameters, context, executema
     except Exception:
         # Never let this hook break statement execution.
         pass
+
+
+# Guard: an invoice's status changes through the object only. A bulk UPDATE of invoices.status skips the
+# before_flush hook that gives the invoice its number when it leaves draft (app.utils.billing_entities).
+@event.listens_for(Session, "do_orm_execute")
+def _no_bulk_invoice_status_update(orm_execute_state):  # pragma: no cover - infra hook
+    if not orm_execute_state.is_update:
+        return
+    statement = orm_execute_state.statement
+    table = getattr(statement, "table", None)
+    if getattr(table, "name", None) != "invoices":
+        return
+    values = getattr(statement, "_values", None) or {}
+    names = {getattr(key, "key", key) for key in values}
+    for params in (
+        orm_execute_state.parameters
+        if isinstance(orm_execute_state.parameters, list)
+        else [orm_execute_state.parameters or {}]
+    ):
+        names.update(getattr(key, "key", key) for key in params)
+    if "status" in names:
+        raise AssertionError("Change an invoice's status through the object, not a bulk UPDATE")
 
 
 # Import all models to ensure their tables are created by db.create_all()

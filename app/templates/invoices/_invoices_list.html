@@ -1,6 +1,7 @@
 {# invoices_project (optional): the project whose invoices are listed; scopes Export and the create link #}
 {% set _list_project_id = invoices_project.id if invoices_project else None %}
 {% from "components/ui.html" import pagination_nav %}
+{% from "invoices/_number_label.html" import number_label %}
 <div id="invoicesListContainer">
     <div class="flex justify-between items-center mb-4">
         {% set _invoice_count = pagination.total if pagination else (invoices|length) %}
@@ -21,6 +22,7 @@
                 </button>
                 <ul id="invoicesBulkMenu" class="bulk-menu hidden absolute right-0 mt-2 w-56 bg-card-light dark:bg-card-dark border border-border-light dark:border-border-dark rounded-md shadow-lg z-50">
                     <li><a class="block px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700" href="#" onclick="return showBulkStatusDialog()"><i class="fas fa-tasks mr-2"></i>Change Status</a></li>
+                    <li><a class="block px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700" href="#" onclick="return showAssignSeriesDialog()"><i class="fas fa-hashtag mr-2"></i>{{ _('Assign from the series when issued') }}</a></li>
                     <li><hr class="my-1 border-border-light dark:border-border-dark"></li>
                     <li><a class="block px-4 py-2 text-sm text-rose-600 hover:bg-gray-100 dark:hover:bg-gray-700" href="#" onclick="return showBulkDeleteConfirm()"><i class="fas fa-trash mr-2"></i>Delete</a></li>
                 </ul>
@@ -54,7 +56,7 @@
                     <input type="checkbox" class="invoice-checkbox h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary" value="{{ invoice.id }}" onchange="updateBulkDeleteButton()">
                 </td>
                 {% endif %}
-                <td class="p-4 font-medium mobile-card-header" data-label="Number">{{ invoice.invoice_number }}</td>
+                <td class="p-4 font-medium mobile-card-header" data-label="Number">{{ number_label(invoice) }}</td>
                 <td class="p-4" data-label="Client">{{ invoice.display_client_name }}</td>
                 <td class="p-4" data-label="Status">
                     {% set s = invoice.status %}

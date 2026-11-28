@@ -39,7 +39,6 @@ def _fill_entity(entity):
     entity.email = _clean("email", 200)
     entity.phone = _clean("phone", 50)
     entity.website = _clean("website", 200)
-    entity.number_format = _clean("number_format", 120)
     vat = (_clean("default_vat_category", 5) or "").upper()
     entity.default_vat_category = vat if vat in VAT_CATEGORIES else None
     rate = _clean("default_tax_rate")
@@ -111,11 +110,14 @@ def index(entity_id=None):
         entity = BillingEntity.query.get_or_404(entity_id)
     elif entities:
         entity = entities[0]
+    from app.utils.billing_entities import numbering_context
+
     return render_template(
         "billing_entities/index.html",
         entities=entities,
         entity=entity,
         vat_categories=VAT_CATEGORIES,
+        numbering=numbering_context(entity) if entity else None,
     )
 
 
@@ -137,6 +139,13 @@ def create():
         flash(logo_error, "error")
         return _render_new(entity), 400
     db.session.add(entity)
+    number_format = _clean("number_format", 120)
+    if number_format:
+        # The format typed on the Add page becomes the entity's default series
+        from app.models import BillingEntityNumberSeries
+
+        db.session.flush()
+        db.session.add(BillingEntityNumberSeries(billing_entity_id=entity.id, number_format=number_format))
     if not safe_commit("billing_entity_create", {"short_name": short_name}):
         flash(_("Could not save the legal entity"), "error")
         return _render_new(entity), 400
@@ -358,3 +367,213 @@ def preview_pdf(entity_id):
         flash(_("The template could not be printed: %(err)s", err=exc.message), "error")
         return redirect(url_for("billing_entities.index", entity_id=entity.id))
     return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=False, download_name="preview.pdf")
+
+
+# --- Numbering: the default series and the series by client ---------------------------------------------
+
+
+def _int_field(name):
+    value = (request.form.get(name, "") or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def _posted_next_seqs(years):
+    return {year: _int_field(f"next_seq_{year}") for year in years}
+
+
+def _flash_checks(errors, warnings):
+    for item in errors:
+        flash(item["message"], "error")
+    for item in warnings:
+        flash(item["message"], "warning")
+
+
+@billing_entities_bp.route("/admin/legal-entities/<int:entity_id>/numbering", methods=["POST"])
+@login_required
+@module_enabled("billing_entities")
+@admin_or_permission_required("manage_settings")
+def save_default_series(entity_id):
+    """Save the entity's default series: format, printed format, Next {SEQ}, Restart every year."""
+    from app.models import BillingEntityNumberSeries
+    from app.utils import billing_entities as billing
+
+    entity = BillingEntity.query.get_or_404(entity_id)
+    series = entity.number_series.filter(
+        BillingEntityNumberSeries.client_id.is_(None), BillingEntityNumberSeries.status == "active"
+    ).first()
+    created = series is None
+    if created:
+        series = BillingEntityNumberSeries(billing_entity_id=entity.id, status="active")
+    number_format = _clean("number_format", 120) or ""
+    printed_format = _clean("printed_format", 120) or "{NUMBER}"
+    reset_yearly = bool(request.form.get("reset_yearly"))
+    probe = BillingEntityNumberSeries(reset_yearly=reset_yearly)
+    next_seqs = _posted_next_seqs(billing.next_seq_years(probe))
+    errors, warnings = billing.check_series(series, number_format, printed_format, reset_yearly, next_seqs)
+    if errors:
+        db.session.rollback()
+        _flash_checks(errors, [])
+        return redirect(url_for("billing_entities.index", entity_id=entity.id) + "#numbering")
+    series.number_format = number_format
+    series.printed_format = printed_format
+    series.reset_yearly = reset_yearly
+    if created:
+        db.session.add(series)
+        db.session.flush()
+        if not any(next_seqs.values()) and entity.number_counter:
+            # Carry on from the counter the entity had before it had series
+            billing.set_last_seq(series, 0, entity.number_counter)
+    billing.save_next_seqs(series, next_seqs)
+    if not safe_commit("billing_entity_default_series", {"billing_entity_id": entity.id}):
+        flash(_("Could not save the numbering"), "error")
+    else:
+        _flash_checks([], warnings)
+        flash(_("Numbering saved"), "success")
+    return redirect(url_for("billing_entities.index", entity_id=entity.id) + "#numbering")
+
+
+def _series_or_404(entity, series_id):
+    from app.models import BillingEntityNumberSeries
+
+    series = BillingEntityNumberSeries.query.get_or_404(series_id)
+    if series.billing_entity_id != entity.id:
+        abort(404)
+    return series
+
+
+def _render_series(entity, series, form=None, errors=None, warnings=None, status=200):
+    from app.models import Client
+    from app.utils import billing_entities as billing
+
+    clients = Client.query.filter_by(status="active").order_by(Client.name).all()
+    if series is not None and series.client_id and all(c.id != series.client_id for c in clients):
+        clients.append(series.client)
+    choices = billing.client_entity_choices([c.id for c in clients])
+    preview = None
+    if series is not None and series.id and series.number_format:
+        preview = billing.series_preview(series)
+    return (
+        render_template(
+            "billing_entities/series.html",
+            entity=entity,
+            series=series,
+            form=form or {},
+            clients=clients,
+            client_entities={str(k): v for k, v in choices.items()},
+            client_entities_on=billing.client_entities_on(),
+            kept_bill_to=(
+                billing.client_entity_name(series.client_entity_id)
+                if series is not None and series.client_entity_id and not billing.client_entities_on()
+                else ""
+            ),
+            next_seq=(billing.last_seq(series, 0) + 1) if series is not None and series.id else 1,
+            preview=preview,
+            errors=errors or [],
+            warnings=warnings or [],
+        ),
+        status,
+    )
+
+
+@billing_entities_bp.route("/admin/legal-entities/<int:entity_id>/series/new", methods=["GET", "POST"])
+@billing_entities_bp.route("/admin/legal-entities/<int:entity_id>/series/<int:series_id>", methods=["GET", "POST"])
+@login_required
+@module_enabled("billing_entities")
+@admin_or_permission_required("manage_settings")
+def series_form(entity_id, series_id=None):
+    """Add or edit a series for a client (Bill to: one of its legal entities, or any)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import BillingEntityNumberSeries, Client
+    from app.utils import billing_entities as billing
+
+    entity = BillingEntity.query.get_or_404(entity_id)
+    series = _series_or_404(entity, series_id) if series_id else None
+    if series is not None and series.client_id is None:
+        # The default series is edited in the Numbering block of the entity page
+        return redirect(url_for("billing_entities.index", entity_id=entity.id) + "#numbering")
+    if request.method == "GET":
+        return _render_series(entity, series)
+
+    form = request.form
+    client = Client.query.get(form.get("client_id", type=int) or 0)
+    if client is None:
+        flash(_("Choose a client"), "error")
+        return _render_series(entity, series, form=form, status=400)
+    bill_to_id = form.get("client_entity_id", type=int) or None
+    if not billing.client_entities_on() and series is not None and series.client_id == client.id:
+        # The form has no Bill to while the module is off: the series keeps the one it was made for
+        bill_to_id = series.client_entity_id
+    elif bill_to_id and billing.client_entity_owner(bill_to_id) != client.id:
+        flash(_("That legal entity is not one of this client's"), "error")
+        return _render_series(entity, series, form=form, status=400)
+    status = form.get("status", "active")
+    status = status if status in ("active", "archived") else "active"
+    target = series or BillingEntityNumberSeries(billing_entity_id=entity.id)
+    with db.session.no_autoflush:
+        target.client_id = client.id
+        target.client_entity_id = bill_to_id
+        target.status = status
+        number_format = _clean("number_format", 120) or ""
+        printed_format = _clean("printed_format", 120) or "{NUMBER}"
+        next_seqs = {0: _int_field("next_seq_0")}
+        errors, warnings = billing.check_series(target, number_format, printed_format, False, next_seqs)
+        clash = _active_clash(target)
+    if clash is not None:
+        errors.append(
+            {
+                "field": "client_entity_id",
+                "message": (
+                    _("Archive the active series first")
+                    if series is not None and series.status == "archived"
+                    else _("This client already has a series for this Bill to: edit that one")
+                ),
+                "use": None,
+            }
+        )
+    if errors:
+        db.session.rollback()
+        return _render_series(entity, series, form=form, errors=errors, warnings=warnings, status=400)
+    target.number_format = number_format
+    target.printed_format = printed_format
+    target.reset_yearly = False
+    if series is None:
+        db.session.add(target)
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        flash(_("This client already has a series for this Bill to: edit that one"), "error")
+        return _render_series(entity, None, form=form, status=400)
+    billing.save_next_seqs(target, next_seqs)
+    if not safe_commit("billing_entity_series", {"billing_entity_id": entity.id}):
+        flash(_("Could not save the series"), "error")
+        return _render_series(entity, series, form=form, status=400)
+    _flash_checks([], warnings)
+    flash(_("Series saved"), "success")
+    return redirect(url_for("billing_entities.index", entity_id=entity.id) + "#numbering")
+
+
+def _active_clash(series):
+    """Another active series for the same client and Bill to (only one may be active)."""
+    from app.models import BillingEntityNumberSeries as Series
+
+    if series.status != "active":
+        return None
+    query = Series.query.filter(
+        Series.billing_entity_id == series.billing_entity_id,
+        Series.client_id == series.client_id,
+        Series.status == "active",
+    )
+    if series.client_entity_id:
+        query = query.filter(Series.client_entity_id == series.client_entity_id)
+    else:
+        query = query.filter(Series.client_entity_id.is_(None))
+    if series.id:
+        query = query.filter(Series.id != series.id)
+    return query.first()

@@ -237,7 +237,19 @@ class PeppolService:
     def send_invoice(
         self, invoice, triggered_by_user_id: Optional[int] = None
     ) -> Tuple[bool, Optional[InvoicePeppolTransmission], str]:
-        """Send the invoice via Peppol. Once sent, a draft or issued invoice becomes ``sent``; on failure it stays as it was."""
+        """Send the invoice via Peppol. Once sent, a draft or issued invoice becomes ``sent``; on failure it stays as it was.
+
+        A draft numbered by its legal entity's series is issued first, its number committed, so the
+        e-invoice carries it; a failed send then leaves it issued with that number.
+        """
+        from app.services import InvoiceService
+
+        failed = InvoiceService().issue_before_sending(invoice, actor_id=triggered_by_user_id)
+        if failed:
+            from app.utils.billing_entities import issue_error_text
+
+            number_error = failed.get("number_error")
+            return False, None, issue_error_text(number_error) if number_error else failed.get("message", "")
         success, tx, message = self._transmit(invoice, triggered_by_user_id)
         if success and (invoice.status or "draft") in ("draft", "issued"):
             from app.services import InvoiceService

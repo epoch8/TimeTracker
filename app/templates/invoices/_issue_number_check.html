@@ -1,0 +1,36 @@
+{# Mark as issued and Send: post, and when the printed number is already used for this client ask
+   "Issue anyway" or "Change number" (the server's 409 duplicate_printed_number carries the texts). #}
+<script nonce="{{ csp_nonce() }}">
+window.ttPostIssuing = async function (url, fields) {
+  // fields: [[name, value], ...] or a FormData. Resolves with the JSON answer; null when the person chose Change number.
+  const expected = document.querySelector('[data-expected-number]');
+  async function send(confirmNumber) {
+    const body = new FormData();
+    if (fields instanceof FormData) {
+      fields.forEach(function (value, key) { body.append(key, value); });
+    } else {
+      (fields || []).forEach(function (pair) { body.append(pair[0], pair[1]); });
+    }
+    if (!body.has('csrf_token')) body.append('csrf_token', "{{ csrf_token() }}");
+    if (expected && !body.has('expected_number')) body.append('expected_number', expected.dataset.expectedNumber || '');
+    if (confirmNumber) body.append('confirm_duplicate_printed_number', confirmNumber);
+    const response = await fetch(url, { method: 'POST', body: body, credentials: 'same-origin' });
+    const data = await response.json().catch(function () { return {}; });
+    return { response: response, data: data };
+  }
+  let answer = await send(null);
+  while (answer.response.status === 409 && answer.data.error === 'duplicate_printed_number' && answer.data.dialog) {
+    const dialog = answer.data.dialog;
+    const issue = await window.ttConfirm(dialog.text, { title: dialog.title, confirmText: dialog.issue, cancelText: dialog.change });
+    if (!issue) {
+      if (dialog.change_url) window.location.href = dialog.change_url;
+      return null;
+    }
+    answer = await send(answer.data.printed_number);
+  }
+  if (!answer.response.ok || answer.data.success === false) {
+    throw new Error(answer.data.message || answer.data.error || ('HTTP ' + answer.response.status));
+  }
+  return answer.data;
+};
+</script>

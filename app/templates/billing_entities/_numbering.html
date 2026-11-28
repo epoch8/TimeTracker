@@ -1,0 +1,155 @@
+{# Invoice numbering block of a legal entity's page: the default series and the series by client.
+   Expects: entity, numbering (app.utils.billing_entities.numbering_context). #}
+{% from "billing_entities/_entity_fields.html" import token, status_pill %}
+{% set d = numbering.default %}
+{% set ds = d.series if d else None %}
+<section id="numbering" class="bg-card-light dark:bg-card-dark rounded-xl border border-border-light dark:border-border-dark shadow-sm" aria-label="{{ _('Invoice numbering') }}">
+    <div class="p-4 sm:p-6 pb-3 sm:pb-3 space-y-3">
+        <h3 class="text-lg font-semibold">{{ _('Invoice numbering') }}</h3>
+        <p class="text-sm">{{ _('Each invoice from %(entity)s has two numbers:', entity=entity.short_name) }}</p>
+        <ul class="text-sm list-disc pl-5 space-y-1">
+            <li><strong>{{ _('Number') }}</strong>: {{ _('unique across all invoices; e-invoices, exports and the PDF file name use it, e.g. ACME-2026-20.') }}</li>
+            <li><strong>{{ _('Printed as') }}</strong>: {{ _('what the client sees on the PDF and in emails, e.g. just 20.') }}</li>
+        </ul>
+        {% if numbering.client_entities_on %}
+        <p class="text-sm">{{ _('Which series an invoice takes: the series for its Bill to; if there is none, the client\'s series for any legal entity; if there is none, the default series. The number is assigned when the invoice is issued.') }}</p>
+        {% else %}
+        <p class="text-sm">{{ _('Which series an invoice takes: the series of its client; if the client has none, the default series. The number is assigned when the invoice is issued.') }}</p>
+        {% endif %}
+        <details class="rounded-lg bg-background-light dark:bg-background-dark p-3 text-sm" open>
+            <summary class="cursor-pointer font-medium">{{ _('Tokens in the formats') }}</summary>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-2">{{ _('Example: an invoice for December 2026, issued on 05/01/2027, the 20th invoice of its series.') }}</p>
+            <div class="overflow-x-auto mt-2">
+                <table class="w-full text-left">
+                    <thead class="text-xs uppercase tracking-wide text-text-muted-light dark:text-text-muted-dark">
+                        <tr><th class="py-1 pr-3 font-semibold">{{ _('Token') }}</th><th class="py-1 pr-3 font-semibold">{{ _('What it puts in') }}</th><th class="py-1 font-semibold">{{ _('Example') }}</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{SEQ}') }}</td><td class="py-1 pr-3">{{ _('The running number of the series: 1, 2, 3… Each series counts on its own; Next {SEQ} says where it goes on.') }}</td><td class="py-1 font-mono whitespace-nowrap">20</td></tr>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{YYYY}') }}</td><td class="py-1 pr-3">{{ _('The year of the month the invoice bills. With Restart every year: the year of the issue date (2027 in the example).') }}</td><td class="py-1 font-mono whitespace-nowrap">2026</td></tr>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{YY}') }}</td><td class="py-1 pr-3">{{ _('The same year, two digits.') }}</td><td class="py-1 font-mono whitespace-nowrap">26</td></tr>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{MM}') }}</td><td class="py-1 pr-3">{{ _('The month the invoice bills.') }}</td><td class="py-1 font-mono whitespace-nowrap">12</td></tr>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{DD}') }}</td><td class="py-1 pr-3">{{ _('The day of the issue date.') }}</td><td class="py-1 font-mono whitespace-nowrap">05</td></tr>
+                        <tr class="border-t border-border-light dark:border-border-dark"><td class="py-1 pr-3">{{ token('{NUMBER}') }}</td><td class="py-1 pr-3">{{ _('Printed as only: the whole invoice number.') }}</td><td class="py-1 font-mono whitespace-nowrap">ACME-2026-20</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-2">{{ _('Number format ACME-{YYYY}-{SEQ} gives ACME-2026-20. Printed as {SEQ} gives 20; {NUMBER} gives ACME-2026-20.') }}</p>
+        </details>
+    </div>
+
+    <form method="POST" action="{{ url_for('billing_entities.save_default_series', entity_id=entity.id) }}" class="px-4 sm:px-6 pb-4 border-t border-border-light dark:border-border-dark pt-4 space-y-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div>
+            <h4 class="font-semibold">{{ _('Default series') }}</h4>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('For clients with no series below') }}</p>
+        </div>
+        {% set yearly = ds and ds.reset_yearly %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="min-w-0">
+                <label for="default_number_format" class="form-label">{{ _('Number format') }}</label>
+                <input type="text" name="number_format" id="default_number_format" value="{{ ds.number_format if ds else numbering.legacy_format }}" class="form-input min-h-[44px] font-mono" placeholder="INV-{YYYY}-{SEQ}">
+            </div>
+            <div class="min-w-0">
+                <label for="default_printed_format" class="form-label">{{ _('Printed as') }}</label>
+                <input type="text" name="printed_format" id="default_printed_format" value="{{ ds.printed_format if ds else '{NUMBER}' }}" class="form-input min-h-[44px] font-mono">
+            </div>
+        </div>
+        <div>
+            <label class="inline-flex items-center gap-2 min-h-[44px]">
+                <input type="checkbox" name="reset_yearly" value="1" id="default_reset_yearly" {% if yearly %}checked{% endif %}>
+                <span>{{ _('Restart every year') }}</span>
+            </label>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('{SEQ} starts again at 1 every year. The year is the issue date\'s, for the counter and for {YYYY}; {MM} is not allowed.') }}</p>
+        </div>
+        <fieldset>
+            <legend class="form-label">{{ _('Next {SEQ}') }}</legend>
+            <div class="flex flex-wrap items-center gap-x-6 gap-y-2{% if not yearly %} hidden{% endif %}" data-yearly-only>
+                {% for year, next in numbering.reset_years %}
+                <label class="inline-flex items-center gap-2 whitespace-nowrap">
+                    <span class="text-sm text-text-muted-light dark:text-text-muted-dark">{{ _('in %(year)s', year=year) }}</span>
+                    <input type="number" min="1" name="next_seq_{{ year }}" id="next_seq_{{ year }}" value="{{ next }}" class="form-input min-h-[44px] w-28"{% if not yearly %} disabled{% endif %}>
+                </label>
+                {% endfor %}
+            </div>
+            <div class="{% if yearly %}hidden{% endif %}" data-plain-only>
+                <input type="number" min="1" name="next_seq_0" id="next_seq_0" value="{{ numbering.plain_next }}" class="form-input min-h-[44px] w-28" aria-label="{{ _('Next {SEQ}') }}"{% if yearly %} disabled{% endif %}>
+            </div>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1" data-yearly-only{% if not yearly %} hidden{% endif %}>{{ _('One counter per year: an invoice takes the counter of its issue date\'s year. The years follow today\'s date: this year and the next (in January also the last one). To switch Restart every year on for a series with issued invoices, check the number for this year.') }}</p>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1" data-plain-only{% if yearly %} hidden{% endif %}>{{ _('To continue a numbering started elsewhere, put the next number here.') }}</p>
+        </fieldset>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+            <p class="text-sm">{% if d %}{{ _('Next:') }} <span class="font-mono">{{ d.next.number }}</span>{% if d.next.printed != d.next.number %}, {{ _('printed %(printed)s.', printed=d.next.printed) }}{% endif %}{% else %}<span class="text-text-muted-light dark:text-text-muted-dark">{{ _('No default series: invoices for clients with no series below get the number from Settings.') }}</span>{% endif %}</p>
+            <button type="submit" class="btn btn-primary">{{ _('Save numbering') }}</button>
+        </div>
+    </form>
+
+    <div class="border-t border-border-light dark:border-border-dark">
+        <div class="flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 pt-4 pb-2">
+            <h4 class="font-semibold">{{ _('Series by client') }}</h4>
+            <a href="{{ url_for('billing_entities.series_form', entity_id=entity.id) }}" class="btn btn-secondary"><i class="fas fa-plus"></i> {{ _('Add series') }}</a>
+        </div>
+        {% if numbering.rows %}
+        <div class="overflow-x-auto pb-3">
+            <table class="w-full text-sm text-left">
+                <thead class="text-xs uppercase tracking-wide text-text-muted-light dark:text-text-muted-dark">
+                    <tr>
+                        <th class="px-4 sm:px-6 py-2 font-semibold">{{ _('Client') }}</th>
+                        {% if numbering.client_entities_on %}<th class="px-2 py-2 font-semibold">{{ _('Bill to') }}</th>{% endif %}
+                        <th class="px-2 py-2 font-semibold">{{ _('Used for') }}</th>
+                        <th class="px-2 py-2 font-semibold">{{ _('Format') }}</th>
+                        <th class="px-2 py-2 font-semibold">{{ _('Printed as') }}</th>
+                        <th class="px-2 py-2 font-semibold">{{ _('Next') }}</th>
+                        <th class="px-2 py-2 font-semibold">{{ _('Last in this series') }}</th>
+                        <th class="px-4 sm:px-6 py-2"><span class="sr-only">{{ _('Actions') }}</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in numbering.rows %}
+                    {% set s = row.series %}
+                    <tr class="border-t border-border-light dark:border-border-dark {% if row.idle %}text-text-muted-light dark:text-text-muted-dark{% endif %}">
+                        <td class="px-4 sm:px-6 py-3 font-semibold">{{ row.client }}{% if not s.is_active %} · {{ status_pill(False) }}{% endif %}</td>
+                        {% if numbering.client_entities_on %}
+                        <td class="px-2 py-3">{% if row.removed %}<span class="text-red-600 dark:text-red-400">{{ _('legal entity removed') }}</span>{% elif s.client_entity_id %}{{ row.bill_to }}{% else %}{{ _('Any legal entity') }}{% endif %}</td>
+                        {% endif %}
+                        <td class="px-2 py-3 text-xs">{{ row.used_for }}</td>
+                        <td class="px-2 py-3 font-mono text-xs whitespace-nowrap">{{ s.number_format }}</td>
+                        <td class="px-2 py-3 font-mono text-xs whitespace-nowrap">{{ s.printed_format }}</td>
+                        <td class="px-2 py-3">{{ row.next }}</td>
+                        <td class="px-2 py-3">{% if row.last %}<span class="font-mono">{{ row.last.number }}</span>{% if row.last.printed and row.last.printed != row.last.number %} · {{ _('printed %(printed)s', printed=row.last.printed) }}{% endif %} · {{ row.last.date }}{% else %}{{ _('None yet') }}{% endif %}</td>
+                        <td class="px-4 sm:px-6 py-3 text-right"><a href="{{ url_for('billing_entities.series_form', entity_id=entity.id, series_id=s.id) }}" class="text-primary hover:underline">{{ _('Edit') }}</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="px-4 sm:px-6 pb-4 text-sm text-text-muted-light dark:text-text-muted-dark">{{ _('No series for clients yet: all invoices take the default series.') }}</p>
+        {% endif %}
+        {% if numbering.client_entities_on %}
+        <p class="px-4 sm:px-6 pb-4 text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('A client can have one series for each of its legal entities (the Bill to of the invoice) and one for any legal entity. An invoice takes the series for its Bill to; if there is none, the one for any legal entity.') }}</p>
+        {% elif numbering.rows | selectattr('bill_to') | list %}
+        <p class="px-4 sm:px-6 pb-4 text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('Client legal entities are switched off, so invoices do not name the client\'s legal entity and each client has one series in use. A series made for one legal entity of a client waits until the module is on again.') }} <a href="{{ url_for('admin.manage_modules') }}" class="text-primary hover:underline">{{ _('Open Modules') }}</a></p>
+        {% endif %}
+    </div>
+</section>
+<script nonce="{{ csp_nonce() }}">
+(function () {
+    // Restart every year asks Next {SEQ} per year; without it, one Next {SEQ}
+    var box = document.getElementById('default_reset_yearly');
+    if (!box) return;
+    function sync() {
+        document.querySelectorAll('[data-yearly-only]').forEach(function (el) {
+            el.classList.toggle('hidden', !box.checked);
+            el.hidden = !box.checked;
+            el.querySelectorAll('input').forEach(function (i) { i.disabled = !box.checked; });
+        });
+        document.querySelectorAll('[data-plain-only]').forEach(function (el) {
+            el.classList.toggle('hidden', box.checked);
+            el.hidden = box.checked;
+            el.querySelectorAll('input').forEach(function (i) { i.disabled = box.checked; });
+        });
+    }
+    box.addEventListener('change', sync);
+})();
+</script>

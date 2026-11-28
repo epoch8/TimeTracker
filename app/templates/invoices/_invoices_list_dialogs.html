@@ -13,6 +13,25 @@
     <input type="hidden" name="status" id="bulkStatusValue">
 </form>
 
+<form id="assignSeriesForm" method="POST" action="{{ url_for('invoices.bulk_assign_series') }}" class="hidden">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ invoices_return_url|default('') }}">
+</form>
+
+<!-- Assign from the series when issued: which drafts get which number -->
+<div id="assignSeriesDialog" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" aria-labelledby="assignSeriesTitle" data-preview-url="{{ url_for('invoices.bulk_assign_series_preview') }}">
+    <div class="bg-card-light dark:bg-card-dark rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+        <h3 id="assignSeriesTitle" class="text-lg font-semibold mb-2">{{ _('Assign from the series when issued') }}</h3>
+        <p class="text-sm text-text-muted-light dark:text-text-muted-dark mb-3">{{ _('Only drafts from our legal entities.') }} {{ _('These drafts will get numbers from their series when issued') }}</p>
+        <ul id="assignSeriesRows" class="text-sm font-mono space-y-1 mb-3"></ul>
+        <div id="assignSeriesNotes" class="text-sm text-amber-700 dark:text-amber-300 space-y-1 mb-3"></div>
+        <div class="flex justify-end gap-2">
+            <button type="button" class="btn btn-secondary" onclick="closeAssignSeriesDialog()">{{ _('Cancel') }}</button>
+            <button type="button" class="btn btn-primary" id="assignSeriesApply" onclick="submitAssignSeries()"></button>
+        </div>
+    </div>
+</div>
+
 <!-- Bulk Delete Confirmation Dialog -->
 <div id="confirmBulkDelete" class="fixed inset-0 z-50 hidden overflow-y-auto" role="dialog" aria-modal="true">
     <div class="flex items-center justify-center min-h-screen px-4">

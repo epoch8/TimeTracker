@@ -240,7 +240,19 @@ def create_invoice():
         invoice_number = None
         typed_number = (request.form.get("invoice_number", "") or "").strip()
         preview_number = (request.form.get("invoice_number_preview", "") or "").strip()
-        if billing_entity:
+        # With series the number is assigned when the invoice is issued: the draft is DRAFT-<id>,
+        # unless a number was set by hand ("Set number now")
+        by_series = billing.numbers_by_series(billing_entity)
+        set_now = billing.set_now_number(request.form) if by_series else ""
+        if by_series:
+            try:
+                if set_now:
+                    billing.check_set_number(set_now)
+            except billing.NumberTaken as taken:
+                db.session.rollback()
+                return _render_create_form(number_error=taken, form_due_date=due_date_str), 409
+            invoice_number = billing.DRAFT_PREFIX + "new"
+        elif billing_entity:
             try:
                 if typed_number and typed_number != preview_number:
                     billing.check_number(billing_entity, typed_number)
@@ -305,6 +317,10 @@ def create_invoice():
                 flash(_(bill_to_error), "error")
                 return redirect(url_for("invoices.create_invoice", project_id=project_id))
             bill_to.apply_to_invoice(invoice, bill_to_entity)
+        if by_series:
+            billing.number_new_draft(invoice, set_now)
+            billing.apply_printed_from_form(invoice, request.form)
+            invoice_number = invoice.invoice_number
 
         db.session.add(invoice)
         if not safe_commit("create_invoice", {"invoice_number": invoice_number, "project_id": project_id}):
@@ -881,6 +897,7 @@ def _render_step_one(invoice=None, selection=None, form=None, number_error=None,
     ``form``: what was posted, shown again after an error; ``number_error``: the number is taken.
     """
     from app.services.invoice_step_one_service import InvoiceStepOneService, StepOneError, resolve_period
+    from app.utils.billing_entities import draft_number_context
     from app.utils.billing_entities import form_context as billing_form_context
     from app.utils.billing_entities import invoice_ref
     from app.utils.client_entities import form_context as bill_to_form_context
@@ -983,6 +1000,7 @@ def _render_step_one(invoice=None, selection=None, form=None, number_error=None,
             default_line_templates=DEFAULT_LINE_TEMPLATES,
             **billing_form_context(form_projects, settings, issue_date=number_issue, period=number_period),
             **bill_to_form_context(form_projects, invoice=invoice),
+            series_draft=draft_number_context(invoice) if invoice is not None else None,
         ),
         status,
     )
@@ -1045,8 +1063,15 @@ def new_invoice():
     preview_number = (form.get("invoice_number_preview", "") or "").strip()
     issue_date = header["issue_date"]
     number_period = service.number_period(selection)
+    by_series = billing.numbers_by_series(billing_entity)
+    set_now = billing.set_now_number(form) if by_series else ""
     try:
-        if billing_entity:
+        if by_series:
+            # The series number is assigned when the invoice is issued; until then the draft is DRAFT-<id>
+            if set_now:
+                billing.check_set_number(set_now)
+            invoice_number = billing.DRAFT_PREFIX + "new"
+        elif billing_entity:
             if typed_number and typed_number != preview_number:
                 billing.check_number(billing_entity, typed_number, issue_date, period=number_period)
                 billing.claim_number(billing_entity, typed_number, issue_date, period=number_period)
@@ -1082,6 +1107,9 @@ def new_invoice():
             flash(_(bill_to_error), "error")
             return _render_step_one(form=form, selection=selection, status=400)
         bill_to.apply_to_invoice(invoice, bill_to_entity)
+    if by_series:
+        billing.number_new_draft(invoice, set_now)
+        billing.apply_printed_from_form(invoice, form)
 
     extra = service.expenses_and_costs(selection)
     db.session.add(invoice)
@@ -1094,7 +1122,7 @@ def new_invoice():
         flash(_("Could not add the time entries: %(error)s", error=str(exc)), "error")
         return _render_step_one(form=form, selection=selection, status=409)
     invoice.calculate_totals()
-    if not safe_commit("new_invoice_step_one", {"invoice_number": invoice_number, "client_id": client.id}):
+    if not safe_commit("new_invoice_step_one", {"invoice_number": invoice.invoice_number, "client_id": client.id}):
         flash(_("Could not create invoice due to a database error. Please check server logs."), "error")
         return _render_step_one(form=form, selection=selection, status=500)
 
@@ -1190,13 +1218,38 @@ def edit_step_one(invoice_id):
     # The number may change on a draft; another invoice's number is refused. {YYYY} and {MM} are
     # the month the invoice bills and {DD} its issue day, as for a new invoice
     typed_number = (form.get("invoice_number", "") or "").strip()
-    if typed_number and typed_number != invoice.invoice_number:
-        entity = invoice.billing_entity if invoice.billing_entity_id else None
-        posted_entity_id = form.get("billing_entity_id", type=int)
-        if billing.module_on() and posted_entity_id and posted_entity_id != invoice.billing_entity_id:
-            from app.models import BillingEntity
+    number_entity = invoice.billing_entity if invoice.billing_entity_id else None
+    posted_entity_id = form.get("billing_entity_id", type=int)
+    if billing.module_on() and posted_entity_id and posted_entity_id != invoice.billing_entity_id:
+        from app.models import BillingEntity
 
-            entity = BillingEntity.query.get(posted_entity_id) or entity
+        number_entity = BillingEntity.query.get(posted_entity_id) or number_entity
+    by_series = billing.numbers_by_series(number_entity)
+    gap = billing.gap_warning(invoice) if by_series else None
+    if by_series:
+        # A draft's number: set by hand now, or handed back to the series (assigned when issued)
+        set_now = billing.set_now_number(form)
+        if form.get("number_from_series"):
+            if not billing.is_draft_placeholder(invoice.invoice_number):
+                billing.set_draft_placeholder(invoice)
+            else:
+                gap = None
+        elif set_now and set_now != invoice.invoice_number:
+            owner = billing.number_owner(set_now, exclude_invoice_id=invoice.id)
+            if owner is not None:
+                return _render_step_one(
+                    invoice,
+                    selection=selection,
+                    form=form,
+                    number_error=billing.NumberTaken(set_now, owner, ""),
+                    status=409,
+                )
+            invoice.invoice_number = set_now
+            invoice.number_series_id = None
+        else:
+            gap = None
+    if not by_series and typed_number and typed_number != invoice.invoice_number:
+        entity = number_entity
         issue_date = header["issue_date"]
         number_period = service.number_period(selection)
         owner = billing.number_owner(typed_number, exclude_invoice_id=invoice.id)
@@ -1238,6 +1291,11 @@ def edit_step_one(invoice_id):
             flash(_(bill_to_error), "error")
             return _render_step_one(invoice, selection=selection, form=form, status=400)
         bill_to.apply_to_invoice(invoice, bill_to_entity)
+    if by_series:
+        _step_one_series_after_bill_to(invoice)
+        billing.apply_printed_from_form(invoice, form)
+        if gap:
+            flash(_("%(number)s will become a gap: later invoices of the series skipped it.", number=gap), "warning")
 
     invoice.project_id = primary.id
     collected = service.hours_changed(before, selection)
@@ -1275,6 +1333,64 @@ def edit_step_one(invoice_id):
     if removed:
         flash(ngettext("%(num)d line added by hand removed", "%(num)d lines added by hand removed", removed), "success")
     return redirect(url_for("invoices.view_invoice", invoice_id=invoice.id))
+
+
+def _step_one_series_after_bill_to(invoice):
+    """A reissue whose From or Bill to now takes another series gets that series' number when issued.
+
+    The printed number of the invoice it replaces stays with that client's series.
+    """
+    from app.utils import billing_entities as billing
+
+    if not invoice.number_series_id or billing.is_draft_placeholder(invoice.invoice_number):
+        return
+    series = billing.series_for_invoice(invoice)
+    if series is None or series.id == invoice.number_series_id:
+        return
+    invoice.printed_number_edited = False
+    billing.set_draft_placeholder(invoice)
+    flash(
+        _(
+            "Bill to changed: this invoice gets a number from the series of %(series)s.",
+            series=billing.series_label(series),
+        ),
+        "info",
+    )
+
+
+@invoices_bp.route("/invoices/number-preview")
+@login_required
+def number_preview():
+    """The Number row of step 1 and the create form, for a From numbered by series (JSON, nothing written).
+
+    ``entity_id``, ``client_id``, ``client_entity_id``, ``issue_date``, ``period_end``, ``invoice_id`` (a draft),
+    ``number`` (set by hand), ``printed`` (Printed as typed).
+    """
+    from app.models import BillingEntity
+    from app.utils import billing_entities as billing
+
+    args = request.args
+    entity = BillingEntity.query.get(args.get("entity_id", type=int) or 0)
+    if entity is None or not billing.module_on():
+        return jsonify({"series": False})
+    invoice = None
+    invoice_id = args.get("invoice_id", type=int)
+    if invoice_id:
+        invoice = Invoice.query.get_or_404(invoice_id)
+        if not current_user.is_admin and invoice.created_by != current_user.id:
+            return jsonify({"error": "forbidden"}), 403
+    client_id = args.get("client_id", type=int) or (invoice.client_id if invoice is not None else None)
+    payload = billing.number_preview_payload(
+        entity,
+        client_id,
+        args.get("client_entity_id", type=int),
+        issue_date=_parse_iso_day(args.get("issue_date")),
+        period=_parse_iso_day(args.get("period_end")),
+        invoice=invoice,
+        typed_number=args.get("number") or "",
+        printed=args.get("printed") or "",
+    )
+    return jsonify(payload)
 
 
 @invoices_bp.route("/invoices/step-1/summary", methods=["POST"])
@@ -1493,8 +1609,21 @@ def view_invoice(invoice_id):
         sdi_recipient_ready=sdi_recipient_ready,
         approval=approval,
         link_templates_by_field=link_templates_by_field,
+        series_label=_series_label(invoice),
         **_issue_and_correct_context(invoice),
     )
+
+
+def _series_label(invoice):
+    """The series an invoice's number came from, e.g. "Client A Holding Ltd · Acme Ltd", or ""."""
+    from app.utils.billing_entities import series_label
+
+    series = invoice.number_series if invoice.number_series_id else None
+    if series is None:
+        return ""
+    entity = series.billing_entity.short_name if series.billing_entity else ""
+    label = series_label(series)
+    return label if series.client_id is None else " · ".join(p for p in (label, entity) if p)
 
 
 def _hours_text(value):
@@ -2102,10 +2231,73 @@ def _invoice_currency_choices(invoice):
     return currency_choices(Settings.get_settings(), extra=[invoice.currency_code])
 
 
+def _repeat_dialog(error, invoice):
+    """Texts of the "printed number already used" dialog (Mark as issued, Send): Issue anyway or Change number."""
+    fmt = current_app.jinja_env.filters.get("format_date")
+    issued = error.other_date
+    issued_text = (fmt(issued) if fmt else issued.isoformat()) if issued else ""
+    if invoice is not None and invoice.printed_number_edited:
+        gets = _(
+            "This invoice gets number %(number)s, printed as %(printed)s (set by hand).",
+            number=error.number,
+            printed=error.printed,
+        )
+    else:
+        gets = _(
+            "This invoice gets number %(number)s, printed as %(printed)s.", number=error.number, printed=error.printed
+        )
+    return {
+        "title": _("No. %(number)s is already used for this client", number=error.printed),
+        "text": " ".join(
+            [
+                gets,
+                _(
+                    "%(other)s, issued %(date)s, is also printed as No. %(printed)s.",
+                    other=error.other_number,
+                    date=issued_text,
+                    printed=error.printed,
+                ),
+                _(
+                    "Customers match invoices and payments by this number. A second No. %(printed)s causes "
+                    "collisions at payment: it may be taken for a duplicate and not paid.",
+                    printed=error.printed,
+                ),
+            ]
+        ),
+        "issue": _("Issue anyway"),
+        "change": _("Change number"),
+        "change_url": _step_one_url(invoice) if invoice is not None else "",
+    }
+
+
+def _number_error_response(error, invoice):
+    """409 for a number that could not be assigned when issuing; a repeated printed number opens the dialog.
+
+    Built from the error's fields, never its text.
+    """
+    from app.utils.billing_entities import DuplicatePrintedNumber
+
+    payload = error.payload()
+    payload["success"] = False
+    if isinstance(error, DuplicatePrintedNumber):
+        payload["dialog"] = _repeat_dialog(error, invoice)
+    return jsonify(payload), 409
+
+
+def _confirmed_repeat_from_request():
+    data = request.get_json(silent=True) or {}
+    value = request.form.get("confirm_duplicate_printed_number") or data.get("confirm_duplicate_printed_number")
+    return (str(value).strip() or None) if value is not None else None
+
+
 @invoices_bp.route("/invoices/<int:invoice_id>/status", methods=["POST"])
 @login_required
 def update_invoice_status(invoice_id):
-    """Update invoice status"""
+    """Update invoice status
+
+    Issuing a draft whose printed number the client already has answers 409 ``duplicate_printed_number``
+    with the dialog's texts; repeat with ``confirm_duplicate_printed_number=<that number>`` to issue anyway.
+    """
     invoice = Invoice.query.get_or_404(invoice_id)
 
     # Check access permissions
@@ -2117,8 +2309,14 @@ def update_invoice_status(invoice_id):
         return jsonify({"error": "Invalid status"}), 400
 
     from app.services import InvoiceService
+    from app.utils import billing_entities as billing
 
-    result = InvoiceService().transition_status(invoice, new_status, actor_id=current_user.id)
+    invoice._numbering_expected = (request.form.get("expected_number") or "").strip() or None
+    result = InvoiceService().transition_status(
+        invoice, new_status, actor_id=current_user.id, confirm_duplicate_printed=_confirmed_repeat_from_request()
+    )
+    if result.get("number_error") is not None:
+        return _number_error_response(result["number_error"], db.session.get(Invoice, invoice_id))
     if not result.get("success"):
         return (
             jsonify(
@@ -2142,6 +2340,9 @@ def update_invoice_status(invoice_id):
 
     if not safe_commit("update_invoice_status", {"invoice_id": invoice.id, "status": new_status}):
         return jsonify({"error": "Database error while updating status"}), 500
+    number_message = billing.numbering_message(invoice)
+    if number_message:
+        flash(number_message, "info")
 
     if new_status == "paid":
         from app.utils.workflow_bridge import fire_invoice_paid_workflow
@@ -2182,7 +2383,14 @@ def update_invoice_status(invoice_id):
     except Exception:
         current_app.logger.warning("Failed to log invoice.status_changed for invoice %s", invoice.id, exc_info=True)
 
-    return jsonify({"success": True, "status": new_status})
+    return jsonify(
+        {
+            "success": True,
+            "status": new_status,
+            "invoice_number": invoice.invoice_number,
+            "printed_number": invoice.printed_number,
+        }
+    )
 
 
 def _back_to_invoice_list():
@@ -2207,6 +2415,9 @@ def delete_invoice(invoice_id):
 
     invoice_number = invoice.invoice_number
     invoice_id_for_event = invoice.id
+    from app.utils.billing_entities import gap_warning
+
+    gap = gap_warning(invoice)
     invoice.release_invoiced_costs_and_expenses()
     db.session.delete(invoice)
     if not safe_commit("delete_invoice", {"invoice_id": invoice_id_for_event}):
@@ -2225,6 +2436,8 @@ def delete_invoice(invoice_id):
         current_app.logger.debug("Failed to emit invoice.deleted for %s", invoice_id_for_event, exc_info=True)
 
     flash(f"Invoice {invoice_number} deleted successfully", "success")
+    if gap:
+        flash(_("%(number)s will become a gap: later invoices of the series skipped it.", number=gap), "warning")
     return _back_to_invoice_list()
 
 
@@ -2317,6 +2530,7 @@ def bulk_update_status():
     skipped_count = 0
     not_allowed_count = 0
     has_payments_count = 0
+    not_issued = []  # "ACME-20 (draft 812): No. 13 is already used for this client"
 
     for invoice_id_str in invoice_ids:
         try:
@@ -2331,12 +2545,22 @@ def bulk_update_status():
                 skipped_count += 1
                 continue
 
+            # A savepoint per invoice: one that cannot get its number is skipped, the others go on
+            savepoint = db.session.begin_nested()
             result = invoice_service.transition_status(
                 invoice,
                 new_status,
                 actor_id=current_user.id,
                 payment_reference=invoice_reference or None,
+                rollback_on_number_error=False,
             )
+            if result.get("success"):
+                savepoint.commit()
+            else:
+                savepoint.rollback()
+            if result.get("number_error") is not None:
+                not_issued.append(_bulk_number_error_text(db.session.get(Invoice, invoice_id), result["number_error"]))
+                continue
             if not result.get("success"):
                 if result.get("error") == "has_payments":
                     has_payments_count += 1
@@ -2389,8 +2613,69 @@ def bulk_update_status():
             ),
             "warning",
         )
+    if not_issued:
+        flash(_("Not issued: %(invoices)s", invoices="; ".join(not_issued)), "warning")
 
     return _back_to_invoice_list()
+
+
+def _bulk_series_drafts(ids):
+    invoices = []
+    for raw in ids:
+        try:
+            invoice = Invoice.query.get(int(raw))
+        except (TypeError, ValueError):
+            continue
+        if invoice is None or (not current_user.is_admin and invoice.created_by != current_user.id):
+            continue
+        invoices.append(invoice)
+    return invoices
+
+
+@invoices_bp.route("/invoices/bulk-assign-series/preview")
+@login_required
+def bulk_assign_series_preview():
+    """Which numbers the selected drafts would get from their series (JSON); nothing is written."""
+    from app.utils import billing_entities as billing
+
+    ids = [i for i in (request.args.get("ids") or "").split(",") if i.strip()]
+    return jsonify(billing.assign_from_series_preview(_bulk_series_drafts(ids)))
+
+
+@invoices_bp.route("/invoices/bulk-assign-series", methods=["POST"])
+@login_required
+def bulk_assign_series():
+    """Assign from the series when issued: the selected drafts of our legal entities go back to DRAFT-<id>."""
+    from app.utils import billing_entities as billing
+
+    changed, gaps = 0, []
+    for invoice in _bulk_series_drafts(request.form.getlist("invoice_ids[]")):
+        if invoice.status != "draft" or billing.is_draft_placeholder(invoice.invoice_number):
+            continue
+        if billing.series_for_invoice(invoice) is None:
+            continue
+        gap = billing.gap_warning(invoice)
+        if gap:
+            gaps.append(gap)
+        billing.set_draft_placeholder(invoice)
+        changed += 1
+    if changed and not safe_commit("bulk_assign_series", {"count": changed}):
+        flash(_("Could not update invoices due to a database error"), "error")
+        return _back_to_invoice_list()
+    flash(_("%(count)d draft(s) will get their number from the series when issued", count=changed), "success")
+    for gap in gaps:
+        flash(_("%(number)s will become a gap: later invoices of the series skipped it.", number=gap), "warning")
+    return _back_to_invoice_list()
+
+
+def _bulk_number_error_text(invoice, error):
+    """One "not issued" entry of a bulk status change: the draft and why it kept no number."""
+    from app.utils.billing_entities import DuplicatePrintedNumber
+
+    name = _("draft %(id)s", id=invoice.id) if invoice is not None else ""
+    if isinstance(error, DuplicatePrintedNumber):
+        return _("%(invoice)s: No. %(number)s is already used for this client", invoice=name, number=error.printed)
+    return _("%(invoice)s: %(reason)s", invoice=name, reason=_(error.message))
 
 
 @invoices_bp.route("/invoices/<int:invoice_id>/generate-from-time", methods=["GET", "POST"])
@@ -3279,6 +3564,22 @@ def send_invoice_email_route(invoice_id):
     # Get email template ID if provided
     email_template_id = request.form.get("email_template_id", type=int) or data.get("email_template_id")
 
+    # A draft numbered by its series is issued first, its number committed: the email and PDF carry it,
+    # and the client never gets DRAFT-…; a printed number the client already has asks first (409)
+    from app.services import InvoiceService
+
+    issued_here = False
+    if invoice.status == "draft":
+        invoice._numbering_expected = (request.form.get("expected_number") or "").strip() or None
+        failed = InvoiceService().issue_before_sending(
+            invoice, actor_id=current_user.id, confirm_duplicate_printed=_confirmed_repeat_from_request()
+        )
+        if failed and failed.get("number_error") is not None:
+            return _number_error_response(failed["number_error"], db.session.get(Invoice, invoice_id))
+        if failed:
+            return client_error_response("Failed to send invoice email", 500)
+        issued_here = invoice.status == "issued"
+
     try:
         from app.utils.email import send_invoice_email
 
@@ -3299,13 +3600,28 @@ def send_invoice_email_route(invoice_id):
                     "invoice_email_id": invoice_email.id if invoice_email else None,
                 }
             )
+        elif issued_here:
+            # The number stays; Send again uses the same number
+            return _issued_not_sent_response(invoice)
         else:
             return client_error_response("Failed to send invoice email", 500)
 
     except Exception as e:
         logger.error(f"Error sending invoice email: {type(e).__name__}: {str(e)}")
         logger.exception("Full error traceback:")
+        if issued_here:
+            return _issued_not_sent_response(invoice)
         return client_error_response(status=500)
+
+
+def _issued_not_sent_response(invoice):
+    """The draft was issued for sending, then sending failed: it stays issued with its number."""
+    invoice = db.session.get(Invoice, invoice.id)
+    message = _(
+        "Issued as %(number)s, not sent: the mail server didn't answer. Send again uses the same number.",
+        number=invoice.invoice_number if invoice else "",
+    )
+    return jsonify({"success": False, "error": message, "issued": True, "not_sent": True}), 502
 
 
 @invoices_bp.route("/invoices/<int:invoice_id>/send-peppol", methods=["POST"])
@@ -3847,6 +4163,16 @@ def _money_text(value):
     return "%.2f" % Decimal(str(value or 0))
 
 
+def _draft_number_info(invoice):
+    from app.utils.billing_entities import draft_number_context
+
+    try:
+        return draft_number_context(invoice)
+    except Exception:
+        current_app.logger.debug("Draft number hints unavailable for %s", invoice.id, exc_info=True)
+        return None
+
+
 def _step_one_url(invoice):
     """Link to step 1 of the invoice, when this version of the app has it."""
     if "invoices.edit_step_one" not in current_app.view_functions:
@@ -4019,6 +4345,7 @@ def _draft_page_context(invoice):
         "zero_rate_lines": zero_rate_lines,
         "tracked_text": _hours_text(summary["tracked_hours"]),
         "step_one_url": _step_one_url(invoice),
+        "number_info": _draft_number_info(invoice),
         "default_hours_rate": service.default_hours_rate(invoice),
         "discount_value": discount,
         "issue_confirm": issue_context["billing_texts"]["issue_confirm"],

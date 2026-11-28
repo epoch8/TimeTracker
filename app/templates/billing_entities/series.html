@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% from "components/ui.html" import page_header %}
+{% from "billing_entities/_entity_fields.html" import token %}
+
+{% block content %}
+{% set title = _('Edit series') if series else _('Add series') %}
+{% set actions %}
+<a href="{{ url_for('billing_entities.index', entity_id=entity.id) }}#numbering" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> {{ _('Back to %(entity)s', entity=entity.short_name) }}</a>
+{% endset %}
+{{ page_header('fas fa-hashtag', title, subtitle_text=_('%(entity)s · invoices to this client get their own numbers', entity=entity.short_name), actions_html=actions, breadcrumbs=[{'text': _('Admin')}, {'text': _('Our legal entities'), 'url': url_for('billing_entities.index')}, {'text': entity.short_name, 'url': url_for('billing_entities.index', entity_id=entity.id)}, {'text': title}]) }}
+
+{% set v_client = (form.get('client_id') if form else None) or (series.client_id if series else '') %}
+{% set v_bill_to = (form.get('client_entity_id') if form else None) or (series.client_entity_id if series and series.client_entity_id else '') %}
+{% set v_format = (form.get('number_format') if form else None) or (series.number_format if series else '') %}
+{% set v_printed = (form.get('printed_format') if form else None) or (series.printed_format if series else '{NUMBER}') %}
+{% set v_next = (form.get('next_seq_0') if form else None) or next_seq %}
+{% set v_status = (form.get('status') if form else None) or (series.status if series else 'active') %}
+
+<form method="POST" class="max-w-3xl space-y-4 sm:space-y-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% if errors %}
+    <div role="alert" class="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-700 dark:text-red-300 space-y-1">
+        {% for e in errors %}
+        <p>{{ e.message }}{% if e.use %} <button type="button" class="font-medium underline" data-use-next="{{ e.use }}">{{ _('Use %(number)s', number=e.use) }}</button>{% endif %}</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if warnings %}
+    <div class="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-200 space-y-1">
+        {% for w in warnings %}<p>{{ w.message }}</p>{% endfor %}
+    </div>
+    {% endif %}
+
+    <section class="bg-card-light dark:bg-card-dark p-4 sm:p-6 rounded-xl border border-border-light dark:border-border-dark shadow-sm grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="min-w-0">
+            <label for="client_id" class="form-label">{{ _('Client') }} *</label>
+            <select name="client_id" id="client_id" class="form-input min-h-[44px]" required>
+                <option value="">{{ _('Choose a client') }}</option>
+                {% for c in clients %}
+                <option value="{{ c.id }}" {% if v_client|string == c.id|string %}selected{% endif %}>{{ c.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if kept_bill_to %}
+        <div class="min-w-0">
+            <p class="form-label">{{ _('For the legal entity') }}</p>
+            <p class="text-sm min-h-[44px] flex items-center">{{ kept_bill_to }}</p>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('This series was made for invoices billed to this legal entity of the client. Client legal entities are switched off, so no invoice takes it until the module is on again.') }}</p>
+        </div>
+        {% endif %}
+        {% if client_entities_on %}
+        <div class="min-w-0">
+            <label for="client_entity_id" class="form-label">{{ _('Bill to') }} *</label>
+            <select name="client_entity_id" id="client_entity_id" class="form-input min-h-[44px]" data-current="{{ v_bill_to }}">
+                <option value="">{{ _('Any legal entity of this client') }}</option>
+            </select>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('Shown only when client legal entities are on. Off: the series is for the client.') }}</p>
+        </div>
+        {% endif %}
+        <div class="min-w-0">
+            <label for="number_format" class="form-label">{{ _('Number format') }} *</label>
+            <input type="text" name="number_format" id="number_format" value="{{ v_format }}" class="form-input min-h-[44px] font-mono" placeholder="CLIENT-{SEQ}" required>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('Stored on the invoice and unique across all invoices') }}</p>
+        </div>
+        <div class="min-w-0">
+            <label for="printed_format" class="form-label">{{ _('Printed as') }}</label>
+            <input type="text" name="printed_format" id="printed_format" value="{{ v_printed }}" class="form-input min-h-[44px] font-mono">
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('What the client sees on the PDF and in emails. E-invoices get the number. {NUMBER}: the whole number.') }}</p>
+        </div>
+        <div class="md:col-span-2 flex flex-wrap gap-2" aria-label="{{ _('Tokens') }}">
+            {% for t in ['{SEQ}', '{YYYY}', '{YY}', '{MM}', '{DD}', '{NUMBER}'] %}
+            <button type="button" class="btn btn-secondary btn-sm font-mono" data-token="{{ t }}">{{ t }}</button>
+            {% endfor %}
+            <p class="w-full text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('{YYYY} {MM}: the month the invoice bills. {DD}: the issue date. {NUMBER}: Printed as only.') }}</p>
+        </div>
+        <div class="min-w-0">
+            <label for="next_seq_0" class="form-label">{{ _('Next {SEQ}') }} *</label>
+            <input type="number" min="1" name="next_seq_0" id="next_seq_0" value="{{ v_next }}" class="form-input min-h-[44px]" required>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('To continue a numbering started elsewhere, put the next number here') }}</p>
+        </div>
+        {% if series %}
+        <div class="min-w-0">
+            <label for="status" class="form-label">{{ _('Status') }}</label>
+            <select name="status" id="status" class="form-input min-h-[44px]">
+                <option value="active" {% if v_status == 'active' %}selected{% endif %}>{{ _('Active') }}</option>
+                <option value="archived" {% if v_status == 'archived' %}selected{% endif %}>{{ _('Archived') }}</option>
+            </select>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('An archived series is not picked; its numbers stay on their invoices.') }}</p>
+        </div>
+        {% endif %}
+        <p class="md:col-span-2 text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('Restart every year is only for the default series of a legal entity.') }}</p>
+        {% if preview %}
+        <div class="md:col-span-2 rounded-lg bg-background-light dark:bg-background-dark p-3 text-sm">
+            <div class="font-semibold mb-1">{{ _('Next invoice to %(series)s', series=preview.series) }}</div>
+            <div>{{ _('Number') }}: <span class="font-mono">{{ preview.number }}</span></div>
+            <div>{{ _('On the PDF') }}: {{ _('Invoice No. %(number)s', number=preview.printed) }}</div>
+        </div>
+        {% endif %}
+    </section>
+
+    <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-3">
+        <a href="{{ url_for('billing_entities.index', entity_id=entity.id) }}#numbering" class="btn btn-secondary">{{ _('Cancel') }}</a>
+        <button type="submit" class="btn btn-primary">{{ _('Save series') }}</button>
+    </div>
+</form>
+<script type="application/json" id="seriesClientEntities" nonce="{{ csp_nonce() }}">{{ client_entities | tojson }}</script>
+<script nonce="{{ csp_nonce() }}">
+(function () {
+    var choices = JSON.parse(document.getElementById('seriesClientEntities').textContent || '{}');
+    var clientSel = document.getElementById('client_id');
+    var billTo = document.getElementById('client_entity_id');
+    var last = document.getElementById('number_format');
+    function fillBillTo() {
+        if (!billTo || !clientSel) return;
+        var current = billTo.dataset.current || billTo.value;
+        while (billTo.options.length > 1) billTo.remove(1);
+        (choices[clientSel.value] || []).forEach(function (pair) {
+            var opt = document.createElement('option');
+            opt.value = pair[0];
+            opt.textContent = pair[1];
+            if (String(pair[0]) === String(current)) opt.selected = true;
+            billTo.appendChild(opt);
+        });
+        billTo.dataset.current = '';
+    }
+    if (clientSel) clientSel.addEventListener('change', fillBillTo);
+    fillBillTo();
+    ['number_format', 'printed_format'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('focus', function () { last = el; });
+    });
+    document.querySelectorAll('[data-token]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            if (!last) return;
+            var at = last.selectionStart != null ? last.selectionStart : last.value.length;
+            last.value = last.value.slice(0, at) + btn.dataset.token + last.value.slice(last.selectionEnd || at);
+            last.focus();
+        });
+    });
+    document.querySelectorAll('[data-use-next]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var input = document.getElementById('next_seq_0');
+            if (input) input.value = btn.dataset.useNext;
+        });
+    });
+})();
+</script>
+{% endblock %}

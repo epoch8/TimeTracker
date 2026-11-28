@@ -1,3 +1,4 @@
+{% include 'invoices/_issue_number_check.html' %}
 <script nonce="{{ csp_nonce() }}">
 (function () {
   const root = document.getElementById('invoiceDraft');
@@ -243,15 +244,10 @@
   document.querySelectorAll('[data-mark-issued]').forEach(function (button) {
     button.addEventListener('click', async function () {
       if (!(await window.ttConfirm(texts.issueConfirm, { confirmText: texts.issueButton }))) return;
-      const body = new FormData();
-      body.append('csrf_token', "{{ csrf_token() }}");
-      body.append('new_status', 'issued');
       try {
-        const response = await fetch("{{ url_for('invoices.update_invoice_status', invoice_id=invoice.id) }}", {
-          method: 'POST', body: body, credentials: 'same-origin'
-        });
-        const data = await response.json().catch(function () { return {}; });
-        if (!response.ok || !data.success) throw new Error(data.error || texts.issueFailed);
+        // A printed number the client already has asks "Issue anyway" or "Change number"
+        const data = await window.ttPostIssuing("{{ url_for('invoices.update_invoice_status', invoice_id=invoice.id) }}", [['new_status', 'issued']]);
+        if (data === null) return;
         window.location.reload();
       } catch (error) {
         toast(error.message || texts.issueFailed, 'error');

@@ -260,6 +260,13 @@ def create_payment():
                 from app.services import InvoiceService
 
                 transition = InvoiceService().transition_status(invoice, "paid", actor_id=current_user.id, force=True)
+                if transition.get("number_error") is not None:
+                    # The draft could not get its number (rolled back): no dialog here
+                    from app.utils.billing_entities import issue_error_text
+
+                    flash(issue_error_text(transition["number_error"]), "error")
+                    invoices = get_user_invoices()
+                    return render_template("payments/create.html", invoices=invoices), 409
                 for warning in transition.get("warnings") or []:
                     current_app.logger.warning("Payment saved for invoice %s: %s", invoice.id, warning)
                     flash(
@@ -395,7 +402,12 @@ def edit_payment(payment_id):
         elif invoice.payment_status == "fully_paid" and invoice.status not in ("paid", "cancelled"):
             from app.services import InvoiceService
 
-            InvoiceService().transition_status(invoice, "paid", actor_id=current_user.id, force=True)
+            transition = InvoiceService().transition_status(invoice, "paid", actor_id=current_user.id, force=True)
+            if transition.get("number_error") is not None:
+                from app.utils.billing_entities import issue_error_text
+
+                flash(issue_error_text(transition["number_error"]), "error")
+                return redirect(url_for("payments.view_payment", payment_id=payment_id))
         elif invoice.status == "paid" and invoice.payment_status != "fully_paid":
             invoice.status = "sent"
 

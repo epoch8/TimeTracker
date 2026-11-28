@@ -90,6 +90,9 @@ class InvoiceRepository(BaseRepository[Invoice]):
         """Mark an invoice as sent"""
         invoice = self.get_by_id(invoice_id)
         if invoice:
+            from app.utils.billing_entities import give_settings_number
+
+            give_settings_number(invoice, InvoiceStatus.SENT.value)
             invoice.status = InvoiceStatus.SENT.value
             return invoice
         return None
@@ -104,6 +107,9 @@ class InvoiceRepository(BaseRepository[Invoice]):
         """Mark an invoice as paid"""
         invoice = self.get_by_id(invoice_id)
         if invoice:
+            from app.utils.billing_entities import give_settings_number
+
+            give_settings_number(invoice, InvoiceStatus.PAID.value)
             invoice.status = InvoiceStatus.PAID.value
             invoice.payment_status = PaymentStatus.FULLY_PAID.value
             invoice.payment_date = payment_date or date.today()

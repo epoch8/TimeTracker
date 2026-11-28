@@ -106,7 +106,11 @@
 </button>
 </div>
 {% endset %}
-{{ page_header('fas fa-file-invoice', 'Invoice ' ~ invoice.invoice_number, actions_html=actions, breadcrumbs=[{'text': _('Invoices'), 'url': url_for('invoices.list_invoices')}, {'text': invoice.invoice_number or _('View Invoice')}]) }}
+{% set number_subtitle = None %}
+{% if invoice.printed_differs or invoice.number_series %}
+{% set number_subtitle = ([_('printed as No. %(number)s', number=invoice.printed_number) if invoice.printed_differs else None, _('Series %(series)s', series=series_label) if series_label else None] | select | join(' · ')) %}
+{% endif %}
+{{ page_header('fas fa-file-invoice', 'Invoice ' ~ invoice.invoice_number, subtitle_text=number_subtitle, actions_html=actions, breadcrumbs=[{'text': _('Invoices'), 'url': url_for('invoices.list_invoices')}, {'text': invoice.invoice_number or _('View Invoice')}]) }}
 <script nonce="{{ csp_nonce() }}">
     document.addEventListener('DOMContentLoaded', function() {
         const sizeSelector = document.getElementById('pdf-size-selector');
@@ -746,6 +750,7 @@
 </div>
 {% endif %}
 
+{% include 'invoices/_issue_number_check.html' %}
 {% if invoice.status == 'draft' %}
 <script nonce="{{ csp_nonce() }}">
 async function markInvoiceIssued() {
@@ -753,15 +758,10 @@ async function markInvoiceIssued() {
   if (!(await ttConfirm(message, { confirmText: {{ _('Mark as issued')|tojson }} }))) {
     return;
   }
-  const body = new FormData();
-  body.append('csrf_token', "{{ csrf_token() }}");
-  body.append('new_status', 'issued');
-  fetch("{{ url_for('invoices.update_invoice_status', invoice_id=invoice.id) }}", { method: 'POST', body })
-    .then(async response => {
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
+  // A printed number the client already has asks "Issue anyway" or "Change number"
+  window.ttPostIssuing("{{ url_for('invoices.update_invoice_status', invoice_id=invoice.id) }}", [['new_status', 'issued']])
+    .then(data => {
+      if (data === null) return;
       window.location.reload();
     })
     .catch(err => {
@@ -900,11 +900,12 @@ function sendInvoiceEmail(event) {
   submitBtn.disabled = true;
   submitBtn.textContent = 'Sending...';
 
-  fetch("{{ url_for('invoices.send_invoice_email_route', invoice_id=invoice.id) }}", {
-    method: 'POST',
-    body: formData
-  })
+  // A draft is issued before it is sent; a printed number the client already has asks first
+  window.ttPostIssuing("{{ url_for('invoices.send_invoice_email_route', invoice_id=invoice.id) }}", formData)
+  .then(data => data === null ? { success: false, error: '', changeNumber: true } : data,
+        error => ({ success: false, error: error.message }))
   .then(async response => {
+    if (!(response instanceof Response)) return response;
     // Check content type to determine how to parse
     const contentType = response.headers.get('content-type') || '';
     const isJson = contentType.includes('application/json');
@@ -928,6 +929,7 @@ function sendInvoiceEmail(event) {
     }
   })
   .then(data => {
+    if (data.changeNumber) return;
     if (data.success) {
       if (window.toastManager) {
         window.toastManager.success('Invoice email sent successfully!');

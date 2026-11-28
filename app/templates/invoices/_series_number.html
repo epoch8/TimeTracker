@@ -1,0 +1,199 @@
+{# Number and Printed as of a new invoice or a draft when its From numbers by series (Legal entities module).
+   The series number is assigned when the invoice is issued; "Set number now" sets it by hand.
+   Expects: series_mode ('create' | 'edit'), series_invoice (a draft, edit only), series_draft (draft_number_context or None).
+   Elements marked data-legacy-number next to it are the entity-format Number field, shown when the From has no series. #}
+{% set sd = series_draft %}
+{% set setnow_value = (request.form.get('invoice_number') if request.method == 'POST' and request.form.get('number_set_now') else '') or ((series_invoice.invoice_number if series_invoice and sd and not sd.placeholder else '')) %}
+<div id="seriesNumberBox" class="hidden space-y-2" data-url="{{ url_for('invoices.number_preview') }}" data-mode="{{ series_mode }}" data-invoice-id="{{ series_invoice.id if series_invoice else '' }}" data-draft-number="{{ series_invoice.invoice_number if series_invoice else '' }}" data-has-number="{{ '1' if sd and not sd.placeholder else '' }}" data-admin="{{ '1' if current_user.is_admin else '' }}" data-entity-url="{{ url_for('billing_entities.index') }}">
+    <input type="hidden" name="number_set_now" id="number_set_now" value="{{ '1' if setnow_value else '' }}">
+    <input type="hidden" name="number_from_series" id="number_from_series" value="">
+    <input type="hidden" name="printed_number_preview" id="printed_number_preview" value="{{ sd.printed if sd else '' }}">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="min-w-0">
+            <span class="form-label" id="seriesNumberLabel">{{ _('Number') }}</span>
+            <div id="seriesWillBeRow" class="flex flex-wrap items-center gap-x-3 gap-y-1 min-h-[44px]">
+                <span>{{ _('Will be') }} <strong class="font-mono" id="seriesWillBe"></strong></span>
+                <button type="button" class="text-sm text-primary underline" id="seriesSetNow">{{ _('Set number now') }}</button>
+            </div>
+            <div id="seriesSetNowRow" class="hidden">
+                <input type="text" name="invoice_number" id="series_invoice_number" value="{{ setnow_value }}" class="form-input text-base min-h-[44px] font-mono" aria-labelledby="seriesNumberLabel" disabled>
+                <button type="button" class="text-sm text-primary underline mt-1" id="seriesBackToSeries">{{ _('Assign from the series when issued') }}</button>
+                <span class="text-sm text-text-muted-light dark:text-text-muted-dark hidden" id="seriesBackWillBe"></span>
+            </div>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1" id="seriesMeta"></p>
+            <p class="text-xs mt-1 hidden" id="seriesTyped"></p>
+            <div role="alert" class="hidden mt-2 rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-sm text-red-700 dark:text-red-300" id="seriesTaken"></div>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1 hidden" id="seriesPrevious"></p>
+            {% if series_invoice and sd and sd.placeholder %}
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('The draft itself is %(number)s until it is issued.', number=series_invoice.invoice_number) }}</p>
+            {% elif series_mode == 'create' %}
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('Until it is issued the draft is DRAFT-<id>, so a deleted draft leaves no gap.') }}</p>
+            {% endif %}
+        </div>
+        <div class="min-w-0">
+            <label for="printed_number" class="form-label">{{ _('Printed as') }}</label>
+            <input type="text" name="printed_number" id="printed_number" value="{{ sd.printed if sd else '' }}" maxlength="50" class="form-input text-base min-h-[44px] font-mono" disabled>
+            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1" id="printedHint">{{ _('From the series. Change only for this invoice.') }}</p>
+            <div class="hidden mt-2 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-800 dark:text-amber-200" id="seriesRepeat"></div>
+        </div>
+    </div>
+</div>
+<script nonce="{{ csp_nonce() }}">
+(function () {
+    var box = document.getElementById('seriesNumberBox');
+    if (!box) return;
+    var T = {
+        assigned: {{ _('Series %(series)s · assigned when issued', series='__SERIES__')|tojson }},
+        assignedDefault: {{ _('%(series)s · assigned when issued', series='__SERIES__')|tojson }},
+        editSeries: {{ _('Edit series')|tojson }},
+        addSeries: {{ _('Add a series for this legal entity')|tojson }},
+        previous: {{ _('Previous in this series: %(invoice)s', invoice='__REF__')|tojson }},
+        printed: {{ _('printed %(printed)s', printed='__P__')|tojson }},
+        yearStarts: {{ _('First invoice for %(year)s: the series starts again at 1.', year='__YEAR__')|tojson }},
+        fits: {{ _('Fits the series format: its {SEQ}')|tojson }},
+        notFits: {{ _("Not from the series. A number that doesn't fit the format is kept as is and the series doesn't move. Printed as starts as the number; you can change it.")|tojson }},
+        taken: {{ _('Number already taken by %(invoice)s', invoice='__REF__')|tojson }},
+        repeat: {{ _('No. %(number)s is already on %(invoice)s', number='__N__', invoice='__REF__')|tojson }},
+        kept: {{ _('Kept when issued.')|tojson }},
+        willBe: {{ _('(will be %(number)s)', number='__N__')|tojson }}
+    };
+    var setNowInput = document.getElementById('series_invoice_number');
+    var setNowFlag = document.getElementById('number_set_now');
+    var fromSeries = document.getElementById('number_from_series');
+    var printedInput = document.getElementById('printed_number');
+    var printedShown = document.getElementById('printed_number_preview');
+    var printedTouched = false;
+    var timer = null, seq = 0, last = null;
+    var hasNumber = !!box.dataset.hasNumber;
+
+    function el(id) { return document.getElementById(id); }
+    function val(id) { var e = el(id); return e ? e.value : ''; }
+    function ref(r) { return r ? [r.number, r.printed && r.printed !== r.number ? T.printed.replace('__P__', r.printed) : '', r.client, r.date].filter(Boolean).join(' · ') : ''; }
+    function legacy(show) {
+        document.querySelectorAll('[data-legacy-number]').forEach(function (n) {
+            n.classList.toggle('hidden', !show);
+            n.querySelectorAll('input').forEach(function (i) { i.disabled = !show; });
+        });
+    }
+    function setNowMode() { return !!setNowFlag.value; }
+    function showSetNow(on) {
+        setNowFlag.value = on ? '1' : '';
+        el('seriesWillBeRow').classList.toggle('hidden', on);
+        el('seriesSetNowRow').classList.toggle('hidden', !on);
+        setNowInput.disabled = !on;
+        if (on) fromSeries.value = '';
+    }
+    function clientId() {
+        if (typeof window.ttSeriesNumberClientId === 'function') return window.ttSeriesNumberClientId();
+        return val('client_id');
+    }
+    function query() {
+        var p = new URLSearchParams();
+        p.set('entity_id', val('billing_entity_id'));
+        p.set('client_id', clientId() || '');
+        p.set('client_entity_id', val('client_entity_id'));
+        p.set('issue_date', val('issue_date'));
+        p.set('period_end', val('period_end'));
+        if (box.dataset.invoiceId) p.set('invoice_id', box.dataset.invoiceId);
+        if (setNowMode()) p.set('number', setNowInput.value.trim());
+        if (printedTouched) p.set('printed', printedInput.value.trim());
+        return p.toString();
+    }
+    function render(d) {
+        last = d;
+        if (!d || !d.series) {
+            box.classList.add('hidden');
+            printedInput.disabled = true;
+            setNowInput.disabled = true;
+            setNowFlag.value = '';
+            legacy(true);
+            return;
+        }
+        legacy(false);
+        box.classList.remove('hidden');
+        printedInput.disabled = false;
+        el('seriesWillBe').textContent = d.number;
+        el('seriesMeta').textContent = d.is_default
+            ? T.assignedDefault.replace('__SERIES__', d.label)
+            : T.assigned.replace('__SERIES__', d.label);
+        if (box.dataset.admin) {
+            var a = document.createElement('a');
+            a.href = box.dataset.entityUrl + '/' + d.entity_url_id + '#numbering';
+            a.className = 'text-primary underline';
+            a.textContent = d.is_default ? T.addSeries : T.editSeries;
+            el('seriesMeta').appendChild(document.createTextNode(' · '));
+            el('seriesMeta').appendChild(a);
+        }
+        var prev = el('seriesPrevious');
+        prev.textContent = d.year_starts && d.year ? T.yearStarts.replace('__YEAR__', d.year) : (d.previous ? T.previous.replace('__REF__', ref(d.previous)) : '');
+        prev.classList.toggle('hidden', !prev.textContent);
+        var back = el('seriesBackWillBe');
+        if (hasNumber && setNowMode()) {
+            back.textContent = T.willBe.replace('__N__', d.number);
+            back.classList.remove('hidden');
+        } else {
+            back.classList.add('hidden');
+        }
+        var typed = el('seriesTyped'), taken = el('seriesTaken');
+        typed.classList.add('hidden');
+        taken.classList.add('hidden');
+        setNowInput.classList.remove('border-red-500');
+        var suggested = d.printed;
+        if (setNowMode() && d.typed) {
+            suggested = d.typed.printed;
+            typed.textContent = hasNumber && d.typed.number === box.dataset.draftNumber ? T.kept : (d.typed.fits ? [T.fits, d.typed.skips || ''].join(' ').trim() : T.notFits);
+            typed.classList.remove('hidden');
+            if (d.typed.taken) {
+                taken.textContent = T.taken.replace('__REF__', ref(d.typed.taken));
+                taken.classList.remove('hidden');
+                setNowInput.classList.add('border-red-500');
+            }
+        }
+        if (!printedTouched) {
+            printedInput.value = suggested || '';
+            printedShown.value = suggested || '';
+        }
+        var rep = el('seriesRepeat');
+        if (d.repeat) {
+            rep.textContent = T.repeat.replace('__N__', d.repeat_printed).replace('__REF__', [d.repeat.number, d.repeat.date].filter(Boolean).join(' · '));
+            rep.classList.remove('hidden');
+        } else {
+            rep.classList.add('hidden');
+        }
+    }
+    function refresh() {
+        var entity = val('billing_entity_id');
+        if (!entity) { render(null); return; }
+        var mine = ++seq;
+        fetch(box.dataset.url + '?' + query(), { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) { if (mine === seq) render(d); })
+            .catch(function () {});
+    }
+    function schedule() { clearTimeout(timer); timer = setTimeout(refresh, 200); }
+
+    el('seriesSetNow').addEventListener('click', function () {
+        showSetNow(true);
+        if (!setNowInput.value && last) setNowInput.value = last.number || '';
+        setNowInput.focus();
+        schedule();
+    });
+    el('seriesBackToSeries').addEventListener('click', function () {
+        showSetNow(false);
+        if (hasNumber) fromSeries.value = '1';
+        schedule();
+    });
+    setNowInput.addEventListener('input', schedule);
+    printedInput.addEventListener('input', function () { printedTouched = true; schedule(); });
+    ['billing_entity_id', 'client_entity_id', 'issue_date', 'period_end', 'client_id', 'project_id'].forEach(function (id) {
+        var e = el(id);
+        if (e) e.addEventListener('change', schedule);
+    });
+    // Other blocks fill Bill to after load: follow its options too
+    var billTo = el('client_entity_id');
+    if (billTo && window.MutationObserver) new MutationObserver(schedule).observe(billTo, { childList: true });
+    if (setNowInput.value) showSetNow(true);
+    window.ttSeriesNumber = { refresh: schedule };
+    schedule();
+})();
+</script>

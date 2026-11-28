@@ -99,6 +99,13 @@ class Invoice(db.Model):
     )
     seller_snapshot = db.Column(db.JSON, nullable=True)  # copy of the entity's details when issued
     payment_details_text = db.Column(db.Text, nullable=True)  # copy of the payment text, {IBAN} filled in
+    # Number series of the legal entity the number came from, and the number the client sees
+    # (PDF, emails, portal). Empty printed number: the invoice number is printed, as before.
+    number_series_id = db.Column(
+        db.Integer, db.ForeignKey("billing_entity_number_series.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    printed_number = db.Column(db.String(50), nullable=True)
+    printed_number_edited = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
 
     # How hours become lines (see app.utils.invoice_time_entry_items) and the period billed
     period_start = db.Column(db.Date, nullable=True)
@@ -127,6 +134,7 @@ class Invoice(db.Model):
     extra_goods = db.relationship("ExtraGood", backref="invoice", lazy="dynamic", cascade="all, delete-orphan")
     billing_entity = db.relationship("BillingEntity", foreign_keys=[billing_entity_id])
     payment_account = db.relationship("PaymentAccount", foreign_keys=[payment_account_id])
+    number_series = db.relationship("BillingEntityNumberSeries", foreign_keys=[number_series_id])
 
     def __init__(self, invoice_number, project_id, client_name, due_date, created_by, client_id, **kwargs):
         self.invoice_number = invoice_number
@@ -173,6 +181,16 @@ class Invoice(db.Model):
 
     def __repr__(self):
         return f"<Invoice {self.invoice_number} ({self.client_name})>"
+
+    @property
+    def display_number(self):
+        """The number the client sees (PDF, emails, portal): the printed number, else the invoice number."""
+        return self.printed_number or self.invoice_number
+
+    @property
+    def printed_differs(self):
+        """True when the client sees another number than the invoice number (lists add "· No. 20")."""
+        return bool(self.printed_number) and self.printed_number != self.invoice_number
 
     @property
     def display_client_name(self):
@@ -293,6 +311,9 @@ class Invoice(db.Model):
         if self.status == "cancelled":
             pass
         elif self.payment_status == "fully_paid":
+            from app.utils.billing_entities import give_settings_number
+
+            give_settings_number(self, "paid")
             self.status = "paid"
         elif self.payment_status in ["partially_paid", "overpaid"]:
             # Keep current status but ensure it's not 'paid' if only partially paid
@@ -517,6 +538,8 @@ class Invoice(db.Model):
         return {
             "id": self.id,
             "invoice_number": self.invoice_number,
+            "printed_number": self.printed_number,
+            "number_series_id": self.number_series_id,
             "project_id": self.project_id,
             "client_name": self.client_name,
             "client_email": self.client_email,

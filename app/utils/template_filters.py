@@ -57,6 +57,23 @@ def _normalize_toastui_markdown(text):
 
 
 def register_template_filters(app):
+    @app.template_global("invoice_will_be")
+    def invoice_will_be(invoice):
+        """The number a DRAFT-… draft will get from its series when issued, or "" (lists: "Draft · will be ACME-21")."""
+        try:
+            from app.utils.billing_entities import is_draft_placeholder, series_for_invoice, series_preview
+
+            if invoice is None or invoice.status != "draft" or not is_draft_placeholder(invoice.invoice_number):
+                return ""
+            series = series_for_invoice(invoice)
+            if series is None:
+                return ""
+            return series_preview(series, invoice.issue_date, invoice.period_end, exclude_invoice_id=invoice.id)[
+                "number"
+            ]
+        except Exception:
+            return ""
+
     """Register custom template filters for the application"""
 
     @app.template_filter("local_datetime")

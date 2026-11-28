@@ -925,7 +925,13 @@ def send_invoice_template_test_email(template_id, recipient_email, invoice_id=No
 
 
 def send_invoice_email(
-    invoice, recipient_email, sender_user=None, custom_message=None, email_template_id=None, subject=None
+    invoice,
+    recipient_email,
+    sender_user=None,
+    custom_message=None,
+    email_template_id=None,
+    subject=None,
+    confirm_duplicate_printed=None,
 ):
     """Send an invoice via email with PDF attachment
 
@@ -936,12 +942,29 @@ def send_invoice_email(
         custom_message: Optional custom message to include in email
         email_template_id: Optional email template ID to use
         subject: Optional subject override (defaults to built template subject)
+        confirm_duplicate_printed: printed number the sender agreed to issue although the client has it
+
+    A draft numbered by its legal entity's series is issued first and its number committed, so the
+    email and the PDF carry it; if sending then fails it stays issued with that number ("not sent").
 
     Returns:
         tuple: (success: bool, invoice_email: InvoiceEmail or None, message: str)
     """
     try:
         from app.models import InvoiceEmail
+        from app.services import InvoiceService
+
+        was_draft = (invoice.status or "draft") == "draft"
+        issue_failed = InvoiceService().issue_before_sending(
+            invoice,
+            actor_id=sender_user.id if sender_user else invoice.created_by,
+            confirm_duplicate_printed=confirm_duplicate_printed,
+        )
+        if issue_failed:
+            from app.utils.billing_entities import issue_error_text
+
+            number_error = issue_failed.get("number_error")
+            return False, None, issue_error_text(number_error) if number_error else issue_failed.get("message", "")
 
         current_app.logger.info(f"[INVOICE EMAIL] Sending invoice {invoice.invoice_number} to {recipient_email}")
 
@@ -1006,7 +1029,7 @@ def send_invoice_email(
             invoice_row = db.session.get(InvoiceModel, invoice.id)
             if invoice_row is None:
                 invoice_row = db.session.merge(invoice)
-            was_first_send = invoice_row.status == "draft"
+            was_first_send = was_draft and invoice_row.status in ("draft", "issued")
             # A draft or issued invoice becomes sent (an issued one was already billed)
             if invoice_row.status in ("draft", "issued"):
                 from app.services import InvoiceService

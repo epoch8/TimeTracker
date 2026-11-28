@@ -258,10 +258,32 @@ class InvoiceCorrectionService:
                 lines.setdefault(link.invoice_item_id, []).append(pair)
         return lines, prepaid
 
-    @staticmethod
-    def _next_number(invoice: Invoice) -> str:
-        """Next number of the invoice's legal entity (for the same billing period), else the global sequence."""
+    @classmethod
+    def _root_number(cls, invoice: Invoice) -> str:
+        """The number of the first invoice of a reissue chain: a reissue of ACME-20-2 is ACME-20-3."""
+        number = invoice.invoice_number
+        seen = set()
+        current = invoice
+        while current is not None and current.id not in seen:
+            seen.add(current.id)
+            previous = cls.reissue_of(current)
+            if not previous or not previous.get("number"):
+                break
+            number = previous["number"]
+            current = previous.get("invoice")
+        return number
+
+    def _next_number(self, invoice: Invoice) -> str:
+        """Next number of the invoice's legal entity (for the same billing period), else the global sequence.
+
+        With number series: the invoice's own number with the first free suffix (ACME-20-2), counted from
+        the first invoice of the chain; the series does not move.
+        """
         entity = invoice.billing_entity
+        from app.utils import billing_entities as billing
+
+        if billing.numbers_by_series(entity) and not billing.is_draft_placeholder(invoice.invoice_number):
+            return billing.unique_number(self._root_number(invoice))
         if entity is not None and (entity.number_format or "").strip():
             from app.utils import billing_entities as billing
 
@@ -316,6 +338,13 @@ class InvoiceCorrectionService:
         # The same PDF template and version, so the reissue prints like the invoice it replaces
         draft.pdf_template_ref = invoice.pdf_template_ref
         draft.pdf_template_version_id = invoice.pdf_template_version_id
+        from app.utils import billing_entities as billing
+
+        if billing.numbers_by_series(invoice.billing_entity) and not billing.is_draft_placeholder(draft.invoice_number):
+            # The client gets the same printed number again, from the same series; the counter stays
+            draft.printed_number = invoice.printed_number or invoice.invoice_number
+            draft.printed_number_edited = False
+            draft.number_series_id = invoice.number_series_id
         return draft
 
     @staticmethod

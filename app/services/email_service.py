@@ -36,6 +36,17 @@ class EmailService:
         if not invoice:
             return {"success": False, "message": "Invoice not found", "error": "not_found"}
 
+        # A draft numbered by its legal entity's series is issued (and its number committed) before sending
+        from app.services import InvoiceService
+
+        failed = InvoiceService().issue_before_sending(invoice)
+        if failed:
+            from app.utils.billing_entities import issue_error_text
+
+            number_error = failed.get("number_error")
+            message = issue_error_text(number_error) if number_error else failed.get("message", "")
+            return {"success": False, "message": message, "error": failed.get("error") or "number_error"}
+
         # Generate subject if not provided
         if not subject:
             subject = f"Invoice {invoice.invoice_number} from {current_app.config.get('COMPANY_NAME', 'TimeTracker')}"

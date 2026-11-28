@@ -95,7 +95,11 @@ def search_invoices(query: str, status: Optional[str] = None) -> List[Invoice]:
     search_term = f"%{query}%"
 
     search_query = Invoice.query.filter(
-        or_(Invoice.invoice_number.ilike(search_term), Invoice.client_name.ilike(search_term))
+        or_(
+            Invoice.invoice_number.ilike(search_term),
+            Invoice.printed_number.ilike(search_term),
+            Invoice.client_name.ilike(search_term),
+        )
     )
 
     if status:

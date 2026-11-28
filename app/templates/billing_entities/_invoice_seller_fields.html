@@ -30,6 +30,9 @@
         </div>
         {% if mode == 'create' %}
         <div class="min-w-0 md:col-span-6" id="invoiceNumberRow">
+            {% set series_mode = 'create' %}{% set series_invoice = None %}{% set series_draft = None %}
+            {% include 'invoices/_series_number.html' %}
+            <div data-legacy-number>
             <label for="invoice_number" class="form-label">{{ _('Number') }}</label>
             <input type="text" name="invoice_number" id="invoice_number" value="{{ posted.number if posted else '' }}" class="form-input text-base min-h-[44px]{% if posted %} border-red-500{% endif %}"{% if posted %} data-touched="1" aria-invalid="true"{% endif %} aria-describedby="numberTaken">
             <input type="hidden" name="invoice_number_preview" id="invoice_number_preview" value="{{ posted.preview if posted else '' }}">
@@ -41,6 +44,7 @@
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _("From the entity's number format. You can edit it.") }}</p>
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1 hidden" id="numberPrevious"></p>
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1 hidden" id="numberLastForClient"></p>
+            </div>
         </div>
         {% endif %}
         <div class="min-w-0 md:col-span-3 md:group-[.has-bill-to]:col-span-2">
@@ -116,6 +120,10 @@ document.addEventListener('DOMContentLoaded', function () {
         if (numberInput) { numberInput.classList.add('border-red-500'); numberInput.setAttribute('aria-invalid', 'true'); }
     }
 
+    // The series Number row asks for the client of the selected project when there is no client field
+    if (!document.getElementById('client_id')) {
+        window.ttSeriesNumberClientId = function () { return clientId(); };
+    }
     function clientId() {
         return projectSel ? (data.projectClients || {})[projectSel.value] : null;
     }

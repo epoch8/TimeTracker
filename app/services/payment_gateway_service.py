@@ -125,7 +125,11 @@ class PaymentGatewayService:
                 if invoice.status not in ("paid", "cancelled"):
                     from app.services import InvoiceService
 
-                    InvoiceService().transition_status(invoice, "paid", force=True)
+                    transition = InvoiceService().transition_status(invoice, "paid", force=True)
+                    if transition.get("number_error") is not None:
+                        from app.utils.billing_entities import issue_error_text
+
+                        return {"success": False, "message": issue_error_text(transition["number_error"])}
                 invoice.payment_date = now_in_app_timezone().date()
             elif invoice.amount_paid > Decimal("0"):
                 invoice.payment_status = "partially_paid"

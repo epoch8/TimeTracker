@@ -226,6 +226,63 @@ function toggleInvoiceReferenceField() {
     }
 }
 
+var assignSeriesIds = [];
+function showAssignSeriesDialog() {
+    const dialog = document.getElementById('assignSeriesDialog');
+    if (!dialog) return false;
+    const ids = Array.from(document.querySelectorAll('.invoice-checkbox:checked')).map(function (cb) { return cb.value; });
+    const rows = document.getElementById('assignSeriesRows');
+    const notes = document.getElementById('assignSeriesNotes');
+    const apply = document.getElementById('assignSeriesApply');
+    const willBe = {{ _('%(draft)s → will be %(number)s', draft='__ID__', number='__N__')|tojson }};
+    const applyText = {{ _('Apply to %(count)s drafts', count='__C__')|tojson }};
+    const none = {{ _('None of the selected invoices is a draft from our legal entities.')|tojson }};
+    fetch(dialog.dataset.previewUrl + '?ids=' + encodeURIComponent(ids.join(',')), { credentials: 'same-origin' })
+        .then(function (r) { return r.ok ? r.json() : { rows: [], notes: [] }; })
+        .then(function (data) {
+            rows.innerHTML = '';
+            notes.innerHTML = '';
+            assignSeriesIds = data.rows.map(function (row) { return row.id; });
+            data.rows.forEach(function (row) {
+                const li = document.createElement('li');
+                li.textContent = willBe.replace('__ID__', row.id).replace('__N__', row.to);
+                rows.appendChild(li);
+            });
+            if (!data.rows.length) {
+                const li = document.createElement('li');
+                li.className = 'font-sans';
+                li.textContent = none;
+                rows.appendChild(li);
+            }
+            (data.notes || []).forEach(function (text) {
+                const p = document.createElement('p');
+                p.textContent = text;
+                notes.appendChild(p);
+            });
+            apply.textContent = applyText.replace('__C__', data.rows.length);
+            apply.disabled = !data.rows.length;
+            dialog.classList.remove('hidden');
+        });
+    return false;
+}
+function closeAssignSeriesDialog() {
+    const dialog = document.getElementById('assignSeriesDialog');
+    if (dialog) dialog.classList.add('hidden');
+}
+function submitAssignSeries() {
+    const form = document.getElementById('assignSeriesForm');
+    if (!form) return;
+    form.querySelectorAll('input[name="invoice_ids[]"]').forEach(function (input) { input.remove(); });
+    assignSeriesIds.forEach(function (id) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'invoice_ids[]';
+        input.value = id;
+        form.appendChild(input);
+    });
+    form.submit();
+}
+
 function submitBulkStatus() {
     const statusSelect = document.getElementById('bulkStatusSelect');
     if (!statusSelect) return;

@@ -137,7 +137,11 @@ class InvoiceApprovalService:
                 if invoice and invoice.status == "draft":
                     from app.services import InvoiceService
 
-                    InvoiceService().transition_status(invoice, "sent", actor_id=approver_id)
+                    transition = InvoiceService().transition_status(invoice, "sent", actor_id=approver_id)
+                    if transition.get("number_error") is not None:
+                        from app.utils.billing_entities import issue_error_text
+
+                        return {"success": False, "message": issue_error_text(transition["number_error"])}
 
             if not safe_commit("approve_invoice", {"approval_id": approval_id}):
                 return {"success": False, "message": "Could not update approval due to a database error."}

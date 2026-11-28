@@ -15,6 +15,30 @@ from app.utils.api_responses import error_response, validation_error_response
 api_v1_invoices_bp = Blueprint("api_v1_invoices", __name__, url_prefix="/api/v1")
 
 
+def _issue_before_send_api(invoice):
+    """Issue a draft numbered by its series before it is sent; None, or the 409 / error response.
+
+    A printed number the client already has: 409 ``duplicate_printed_number`` with the details; send
+    again with ``confirm_duplicate_printed_number=<that printed number>`` to issue anyway.
+    """
+    from app.services import InvoiceService
+
+    data = request.get_json(silent=True) or {}
+    confirm = data.get("confirm_duplicate_printed_number") or request.args.get("confirm_duplicate_printed_number")
+    failed = InvoiceService().issue_before_sending(
+        invoice, actor_id=g.api_user.id, confirm_duplicate_printed=str(confirm).strip() if confirm else None
+    )
+    if not failed:
+        return None
+    number_error = failed.get("number_error")
+    if number_error is None:
+        return error_response("Could not issue the invoice", status_code=409, error_code=failed.get("error"))
+    payload = number_error.payload()
+    return error_response(
+        payload.pop("message"), error_code=payload.pop("error"), status_code=409, details=payload or None
+    )
+
+
 def _invoice_service():
     from app.services import InvoiceService
 
@@ -524,6 +548,9 @@ def send_invoice_peppol_api(invoice_id):
     invoice, err = _load_invoice_for_api(invoice_id)
     if err:
         return err
+    issue_err = _issue_before_send_api(invoice)
+    if issue_err:
+        return issue_err
     try:
         service = PeppolService()
         success, tx, message = service.send_invoice(invoice=invoice, triggered_by_user_id=g.api_user.id)
@@ -557,6 +584,9 @@ def send_invoice_sdi_api(invoice_id):
     invoice = Invoice.query.get(invoice_id)
     if not invoice:
         return error_response("Invoice not found", status_code=404)
+    issue_err = _issue_before_send_api(invoice)
+    if issue_err:
+        return issue_err
     try:
         service = SdiService()
         success, tx, _message = service.send_invoice(invoice=invoice, triggered_by_user_id=g.api_user.id)
@@ -595,6 +625,9 @@ def send_invoice_email_api(invoice_id):
     subject = (data.get("subject") or "").strip() or None
     custom_message = (data.get("custom_message") or data.get("message") or "").strip() or None
     email_template_id = data.get("email_template_id")
+    issue_err = _issue_before_send_api(invoice)
+    if issue_err:
+        return issue_err
 
     try:
         from app.utils.email import send_invoice_email

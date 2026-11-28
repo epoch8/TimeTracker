@@ -103,13 +103,21 @@
             })();
             </script>
         </div>
+        {% if entity and entity.id %}
+        <div class="md:col-span-6">
+            <div class="form-label">{{ _('Number format') }}</div>
+            <p class="text-sm text-text-muted-light dark:text-text-muted-dark"><a href="#numbering" class="text-primary hover:underline">{{ _('Invoice numbering') }}</a>: {{ _('the default series and the series by client, below.') }}</p>
+        </div>
+        {% else %}
+        {# A saved entity has the Invoice numbering block instead (series, printed number, counters) #}
         <div class="md:col-span-6">
             <label for="number_format" class="form-label">{{ _('Number format') }}</label>
-            <input type="text" name="number_format" id="number_format" value="{{ entity.number_format or '' if entity else '' }}" class="form-input min-h-[44px] font-mono md:max-w-sm" placeholder="INV-{YYYY}-{SEQ}">
+            <input type="text" name="number_format" id="number_format" value="{{ request.form.get('number_format', '') if request.method == 'POST' else '' }}" class="form-input min-h-[44px] font-mono md:max-w-sm" placeholder="INV-{YYYY}-{SEQ}">
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1 leading-relaxed">
-                {{ _('Tokens') }} {{ token('{YYYY}') }} {{ token('{MM}') }} {{ _('– the billing period, the month before the issue date. Also') }} {{ token('{YY}') }} {{ token('{DD}') }} {{ token('{SEQ}') }}. {{ _('A taken number gets -2, -3. Empty: the series from Settings.') }}
+                {{ _('Tokens') }} {{ token('{YYYY}') }} {{ token('{MM}') }} {{ _('– the billing period, the month before the issue date. Also') }} {{ token('{YY}') }} {{ token('{DD}') }} {{ token('{SEQ}') }}. {{ _('It becomes the default series of the entity; series for clients are added on its page. Empty: the series from Settings.') }}
             </p>
         </div>
+        {% endif %}
         <div class="md:col-span-2">
             <label for="default_vat_category" class="form-label">{{ _('VAT category') }}</label>
             <select name="default_vat_category" id="default_vat_category" class="form-input min-h-[44px]">

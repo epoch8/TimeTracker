@@ -14,6 +14,7 @@ from .attendance_compliance import (
 from .audit_log import AuditLog
 from .bank_transaction import BankTransaction
 from .billing_entity import BillingEntity, PaymentAccount
+from .billing_entity_number_series import BillingEntityNumberCounter, BillingEntityNumberSeries
 from .budget_alert import BudgetAlert
 from .calendar_event import CalendarEvent
 from .calendar_integration import CalendarIntegration, CalendarSyncEvent
@@ -133,6 +134,8 @@ from .working_time_violation import WorkingTimeViolation
 
 __all__ = [
     "BillingEntity",
+    "BillingEntityNumberCounter",
+    "BillingEntityNumberSeries",
     "PaymentAccount",
     "User",
     "UserSmartNotificationDismissal",

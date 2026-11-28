@@ -1,0 +1,10 @@
+{# An invoice's number in lists, payments and time entry badges: "ACME-20 · No. 20" when the printed
+   number differs; a draft waiting for its series number: "Draft · will be ACME-21". #}
+{% macro number_label(invoice) -%}
+{%- set will_be = invoice_will_be(invoice) -%}
+{%- if will_be -%}
+{{ _('Draft') }} <span class="text-text-muted-light dark:text-text-muted-dark">· {{ _('will be %(number)s', number=will_be) }}</span>
+{%- else -%}
+{{ invoice.invoice_number }}{% if invoice.printed_differs %} <span class="text-text-muted-light dark:text-text-muted-dark">· {{ _('No. %(number)s', number=invoice.printed_number) }}</span>{% endif %}
+{%- endif -%}
+{%- endmacro %}

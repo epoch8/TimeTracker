@@ -31,7 +31,21 @@
             {% if bill_email %}<p class="text-text-muted-light dark:text-text-muted-dark">{{ _('Send to %(email)s', email=bill_email) }}</p>{% endif %}
         </div>
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+            {% if number_info and number_info.placeholder and number_info.series %}
+            <dt class="text-text-muted-light dark:text-text-muted-dark">{{ _('Number') }}</dt>
+            <dd>
+                {{ _('will be') }} <span class="font-mono font-semibold" data-expected-number="{{ number_info.series.number }}">{{ number_info.series.number }}</span>{% if number_info.printed and number_info.printed != number_info.series.number %} · {{ _('printed %(printed)s', printed=number_info.printed) }}{% endif %} · {{ _('assigned when issued') }} · <a href="{{ step_one_url }}" class="text-primary hover:underline">{{ _('Change') }}</a>
+                <p class="text-xs text-text-muted-light dark:text-text-muted-dark">{{ _('Until then this draft is %(number)s; its PDF says so.', number=invoice.invoice_number) }}</p>
+            </dd>
+            {% elif number_info %}
+            <dt class="text-text-muted-light dark:text-text-muted-dark">{{ _('Invoice') }}</dt>
+            <dd><span class="font-mono" data-expected-number="{{ invoice.invoice_number }}">{{ invoice.invoice_number }}</span>{% if number_info.printed and number_info.printed != invoice.invoice_number %} · {{ _('printed %(printed)s', printed=number_info.printed) }}{% endif %} · <a href="{{ step_one_url }}" class="text-primary hover:underline">{{ _('Change') }}</a></dd>
+            {% else %}
             <dt class="text-text-muted-light dark:text-text-muted-dark">{{ _('Invoice') }}</dt><dd>{{ invoice.invoice_number }}</dd>
+            {% endif %}
+            {% if number_info and number_info.repeat %}
+            <dd class="col-span-2 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-amber-800 dark:text-amber-200">{{ _('No. %(number)s is already on %(invoice)s', number=number_info.printed, invoice=[number_info.repeat.number, number_info.repeat.date]|select|join(' · ')) }}</dd>
+            {% endif %}
             {% if invoice.period_start and invoice.period_end %}
             <dt class="text-text-muted-light dark:text-text-muted-dark">{{ _('Period') }}</dt>
             <dd id="draftPeriod">{{ invoice.period_start|format_date }} – {{ invoice.period_end|format_date }}</dd>
