@@ -651,7 +651,7 @@ def test_number_used_by_an_issued_invoice_of_another_series_is_named_so(app, pro
     _issue(inv)
     assert inv.invoice_number == "CLIENTA-26"
     message = billing.numbering_message(inv)
-    assert f"CLIENTA-25 is already used by invoice {taken.id}" in message
+    assert f"CLIENTA-25 is already used by invoice #{taken.id}." in message
     assert "held by draft" not in message
 
 

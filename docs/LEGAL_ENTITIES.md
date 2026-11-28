@@ -160,7 +160,7 @@ A draft from an entity with series is `DRAFT-<id>`. It gets the series' next fre
 - **Set number now** sets a number by hand. Its `{SEQ}` is taken when the invoice is issued; the counter only moves forward. When another draft is issued, a number held by such a draft is skipped and named.
 - **Assign from the series when issued** hands a number set by hand back to the series. In the invoice list, the same action works for selected drafts, with a preview.
 - Sending a draft (e-mail, Peppol, SDI) issues it and commits its number first, then sends. If sending fails, the invoice stays issued with its number.
-- The client never sees `DRAFT-…`. A draft of our legal entity notifies the client when it is issued, not when it is created: with `DRAFT-`, a number set by hand or an older number alike. The notification carries the printed number. A draft deleted before that notifies nobody.
+- The client never sees `DRAFT-…`. A draft of our legal entity notifies the client when it is issued, not when it is created: with `DRAFT-`, a number set by hand or an older number alike. The notification carries the printed number. A draft deleted before that notifies nobody, and a client already notified about the invoice is not notified again.
 
 A draft made before the entity had series is issued with the number it has.
 
@@ -209,4 +209,4 @@ How a number is given:
 2. It checks the repeated printed number before writing anything.
 3. Numbering errors are `IssueNumberError` subclasses with a fixed, translated message. The exception text is never shown.
 
-Migration `224_add_invoice_number_series` turns each entity's number format into its default series and keeps the counter. It also replaces `invoice.invoice_number` with `invoice.display_number` in saved invoice templates.
+Migration `224_add_invoice_number_series` turns each entity's number format into its default series and keeps the counter. It also replaces `invoice.invoice_number` with `invoice.display_number` in saved PDF and email templates (`invoice_templates`).

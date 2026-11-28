@@ -1359,7 +1359,7 @@ def numbering_message(invoice):
             draft=held[0],
         )
     elif held:
-        text += " " + _("%(number)s is already used by invoice %(invoice)s.", number=held[1], invoice=held[0])
+        text += " " + _("%(number)s is already used by invoice #%(invoice)s.", number=held[1], invoice=held[0])
     elif result.get("draft_said"):
         text += " " + _(
             "The draft said %(expected)s, but %(expected)s was issued first from another draft.",
