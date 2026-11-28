@@ -1,8 +1,42 @@
 {# Mark as issued and Send: post, and when the printed number is already used for this client ask
-   "Issue anyway" or "Change number" (the server's 409 duplicate_printed_number carries the texts). #}
+   "Issue anyway" or "Change number" (the server's 409 duplicate_printed_number carries the texts).
+   Escape or a click outside the box closes it and nothing happens; only Change number opens step 1. #}
+<dialog id="ttRepeatDialog" class="rounded-xl p-0 max-w-md w-[calc(100%-2rem)] bg-card-light dark:bg-card-dark text-text-light dark:text-text-dark shadow-xl backdrop:bg-black/40">
+  <div class="p-5 space-y-3">
+    <h3 class="text-lg font-semibold" data-repeat-title></h3>
+    <p class="text-sm" data-repeat-text></p>
+    <div class="flex flex-wrap justify-end gap-2 pt-2">
+      <button type="button" class="btn btn-secondary" data-repeat-choice="change"></button>
+      <button type="button" class="btn btn-primary" data-repeat-choice="issue"></button>
+    </div>
+  </div>
+</dialog>
 <script nonce="{{ csp_nonce() }}">
+window.ttAskRepeat = function (dialog) {
+  // Three answers: "issue", "change", or null (Escape, a click outside the box)
+  const box = document.getElementById('ttRepeatDialog');
+  box.querySelector('[data-repeat-title]').textContent = dialog.title || '';
+  box.querySelector('[data-repeat-text]').textContent = dialog.text || '';
+  box.querySelector('[data-repeat-choice="issue"]').textContent = dialog.issue || '';
+  box.querySelector('[data-repeat-choice="change"]').textContent = dialog.change || '';
+  return new Promise(function (resolve) {
+    let choice = null;
+    function pick(event) {
+      const button = event.target.closest('[data-repeat-choice]');
+      if (button) choice = button.dataset.repeatChoice;
+      if (button || event.target === box) box.close();
+    }
+    box.addEventListener('click', pick);
+    box.addEventListener('close', function done() {
+      box.removeEventListener('click', pick);
+      box.removeEventListener('close', done);
+      resolve(choice);
+    });
+    box.showModal();
+  });
+};
 window.ttPostIssuing = async function (url, fields) {
-  // fields: [[name, value], ...] or a FormData. Resolves with the JSON answer; null when the person chose Change number.
+  // fields: [[name, value], ...] or a FormData. Resolves with the JSON answer; null when the person did not issue.
   const expected = document.querySelector('[data-expected-number]');
   async function send(confirmNumber) {
     const body = new FormData();
@@ -21,11 +55,12 @@ window.ttPostIssuing = async function (url, fields) {
   let answer = await send(null);
   while (answer.response.status === 409 && answer.data.error === 'duplicate_printed_number' && answer.data.dialog) {
     const dialog = answer.data.dialog;
-    const issue = await window.ttConfirm(dialog.text, { title: dialog.title, confirmText: dialog.issue, cancelText: dialog.change });
-    if (!issue) {
+    const choice = await window.ttAskRepeat(dialog);
+    if (choice === 'change') {
       if (dialog.change_url) window.location.href = dialog.change_url;
       return null;
     }
+    if (choice !== 'issue') return null;  // Escape or a click outside: nothing happens, the page stays
     answer = await send(answer.data.printed_number);
   }
   if (!answer.response.ok || answer.data.success === false) {

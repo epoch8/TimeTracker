@@ -929,7 +929,12 @@ function sendInvoiceEmail(event) {
     }
   })
   .then(data => {
-    if (data.changeNumber) return;
+    if (data.changeNumber) {
+      // Not issued (the repeat dialog was closed, or Change number opens step 1): the form stays usable
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalText;
+      return;
+    }
     if (data.success) {
       if (window.toastManager) {
         window.toastManager.success('Invoice email sent successfully!');
