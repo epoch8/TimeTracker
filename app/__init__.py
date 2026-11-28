@@ -354,13 +354,20 @@ def create_app(config=None):
 
     @app.teardown_request
     def _notify_issued_invoices(exc=None):
-        if exc is None:
-            send_issue_notifications()
+        # Never break the teardown chain: the session must still be removed after this
+        try:
+            if exc is None:
+                send_issue_notifications()
+        except Exception:
+            app.logger.exception("Notifications for issued invoices failed")
 
     @app.teardown_appcontext
     def _notify_issued_invoices_outside_requests(exc=None):
-        if exc is None:
-            send_issue_notifications()
+        try:
+            if exc is None:
+                send_issue_notifications()
+        except Exception:
+            app.logger.exception("Notifications for issued invoices failed")
 
     migrate.init_app(app, db)
     login_manager.init_app(app)

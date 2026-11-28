@@ -425,9 +425,8 @@ def seller_settings_for(invoice, settings):
 # deleted draft leaves no gap. An entity with no series at all keeps the entity's own number format,
 # given when the draft is created (as before series existed).
 
-# session.info keys: drafts issued in the open transaction / in committed ones, to notify their client
-_NOTIFY_PENDING = "invoice_numbering_notify"
-_NOTIFY_READY = "invoice_numbering_notify_ready"
+# session.info key: invoices of our legal entities that left draft, whose client may need the notification
+_NOTIFY_CANDIDATES = "invoice_numbering_notify"
 
 DRAFT_PREFIX = "DRAFT-"
 CLIENT_ENTITIES_MODULE_ID = "client_entities"
@@ -1006,7 +1005,7 @@ def numbering_before_flush(session):
         for invoice in leaving:
             if invoice.id and invoice.client_id and invoice.billing_entity_id:
                 # The client was not told about the draft (see notify_on_issue): it is told now, with its number
-                session.info.setdefault(_NOTIFY_PENDING, []).append(invoice.id)
+                session.info.setdefault(_NOTIFY_CANDIDATES, []).append(invoice.id)
 
 
 def notify_on_issue(invoice):
@@ -1022,42 +1021,47 @@ def notify_on_issue(invoice):
     )
 
 
-def numbering_after_commit(session):
-    """``after_commit``: the issued drafts of this transaction wait for ``send_issue_notifications``."""
-    pending = session.info.pop(_NOTIFY_PENDING, None)
-    if pending:
-        session.info.setdefault(_NOTIFY_READY, []).extend(pending)
+def _already_notified(invoice):
+    """True when the client already has a "new invoice" notification for this invoice (e.g. from before the series)."""
+    from app.models.client_notification import ClientNotification, NotificationType
 
-
-def numbering_after_rollback(session):
-    """``after_rollback``: nothing was issued."""
-    session.info.pop(_NOTIFY_PENDING, None)
+    url = f"/client-portal/invoices/{invoice.id}"
+    rows = ClientNotification.query.filter_by(
+        client_id=invoice.client_id, type=NotificationType.INVOICE_CREATED.value
+    ).all()
+    return any(n.link_url == url or (n.extra_data or {}).get("invoice_id") == invoice.id for n in rows)
 
 
 def send_issue_notifications():
-    """Notify clients about invoices issued from a draft of our legal entity, after the commit that issued them.
+    """Notify clients about invoices issued from a draft of our legal entity.
 
-    Called when a request or an app context ends: the commit itself can't send (no SQL in
-    ``after_commit``). Each invoice is checked again, so one rolled back to a savepoint is skipped.
+    Called when a request or an app context ends: a commit can't send (no SQL in ``after_commit``),
+    and savepoints make commit and rollback events unreliable for "was it issued". So the hook only
+    lists candidates, and each one is read again from the database here: an invoice whose issue was
+    rolled back is still a draft and is skipped, one the client already heard of is skipped too.
     """
-    if not db.session.registry.has():
+    try:
+        if not db.session.registry.has():
+            return
+        session = db.session()
+        candidates = session.info.pop(_NOTIFY_CANDIDATES, None)
+        if not candidates:
+            return
+        if session.in_transaction():
+            # What was not committed (pending objects, or rows only flushed) ends with the request anyway;
+            # the notification commits, so it must not commit that too
+            session.rollback()
+        from app.models import Invoice
+        from app.services.client_notification_service import ClientNotificationService
+    except Exception:
+        logger.exception("Could not prepare the notifications for issued invoices")
         return
-    session = db.session()
-    ready = session.info.pop(_NOTIFY_READY, None)
-    if not ready:
-        return
-    from app.models import Invoice
-    from app.services.client_notification_service import ClientNotificationService
-
-    if session.new or session.dirty or session.deleted:
-        # Changes nobody committed are dropped when the request ends anyway; the notice must not commit them
-        session.rollback()
-    for invoice_id in dict.fromkeys(ready):
+    for invoice_id in dict.fromkeys(candidates):
         try:
             invoice = db.session.get(Invoice, invoice_id)
             if invoice is None or not invoice.client_id or invoice.status in _NOT_ISSUED:
                 continue
-            if is_draft_placeholder(invoice.invoice_number):
+            if is_draft_placeholder(invoice.invoice_number) or _already_notified(invoice):
                 continue
             ClientNotificationService().notify_invoice_created(invoice.id, invoice.client_id)
         except Exception:

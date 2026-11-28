@@ -778,3 +778,73 @@ def test_without_our_entity_a_draft_notifies_when_created(app, project, test_cli
     _issue(draft)
     billing.send_issue_notifications()
     assert _notices() == ["New Invoice: INV-1"]  # and not again
+
+
+def test_issue_does_not_notify_twice_when_the_client_was_told_before(app, project, test_client, user, entity):
+    from app.models.client_notification import ClientNotification
+
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    # a draft made before this change: its client was told when it was created
+    db.session.add(
+        ClientNotification(
+            client_id=test_client.id,
+            type="invoice_created",
+            title=f"New Invoice: {draft.invoice_number}",
+            message="A new invoice has been created.",
+            link_url=f"/client-portal/invoices/{draft.id}",
+            extra_data={"invoice_id": draft.id},
+        )
+    )
+    db.session.commit()
+    _issue(draft)
+    billing.send_issue_notifications()
+    assert len(_notices()) == 1
+
+
+def test_notification_never_commits_what_was_only_flushed(app, project, test_client, user, entity):
+    from sqlalchemy import text
+
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    _issue(draft)
+    name = test_client.name
+    test_client.name = "Renamed, not committed"
+    db.session.flush()  # in the database transaction, not committed
+    billing.send_issue_notifications()
+    assert _notices() == ["New Invoice: 20"]
+    stored = db.session.execute(text("SELECT name FROM clients WHERE id = :i"), {"i": test_client.id}).scalar()
+    assert stored == name
+
+
+def test_a_rolled_back_savepoint_does_not_lose_the_notification(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    assert InvoiceService().transition_status(draft, "issued")["success"]  # numbered in the open transaction
+    savepoint = db.session.begin_nested()  # e.g. a stock movement that fails after the number was given
+    savepoint.rollback()
+    db.session.commit()
+    billing.send_issue_notifications()
+    assert _notices() == ["New Invoice: 20"]
+
+
+def test_a_rolled_back_issue_notifies_nobody(app, project, test_client, user, entity):
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, printed="{SEQ}", next_seq=20)
+    draft = _draft(project, test_client, user, entity)
+    assert InvoiceService().transition_status(draft, "issued")["success"]
+    db.session.rollback()
+    billing.send_issue_notifications()
+    assert _notices() == []
+    assert db.session.get(Invoice, draft.id).status == "draft"
+
+
+def test_sending_notifications_never_raises(app, monkeypatch):
+    class Broken:
+        def has(self):
+            raise RuntimeError("registry is gone")
+
+    monkeypatch.setattr(db.session, "registry", Broken())
+    try:
+        billing.send_issue_notifications()  # logged, not raised: the teardown chain goes on
+    finally:
+        monkeypatch.undo()
