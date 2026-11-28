@@ -28,6 +28,7 @@ from flask_babel import gettext as _
 
 from app import db
 from app.models import InvoicePDFTemplate, QuotePDFTemplate, Settings
+from app.utils.invoice_numbering import pdf_display_number
 
 try:
     from babel.dates import format_date as babel_format_date
@@ -650,6 +651,7 @@ class InvoicePDFGenerator:
                 setattr(invoice_wrapper, attr, getattr(self.invoice, attr))
             except AttributeError:
                 pass
+        invoice_wrapper.display_number = pdf_display_number(self.invoice, self.settings)
 
         # Convert relationships to lists
         try:
@@ -992,6 +994,7 @@ class InvoicePDFGenerator:
                     setattr(invoice_data, attr, getattr(self.invoice, attr))
                 except Exception:
                     pass
+        invoice_data.display_number = pdf_display_number(self.invoice, self.settings)
         # Override with converted lists
         invoice_data.items = invoice_items
         invoice_data.extra_goods = invoice_extra_goods
@@ -1080,7 +1083,7 @@ class InvoicePDFGenerator:
 
                 print(f"Error rendering default PDF template: {e}")
                 print(traceback.format_exc())
-                html = f"<html><body><h1>{_('Invoice')} {self.invoice.invoice_number}</h1></body></html>"
+                html = f"<html><body><h1>{_('Invoice')} {pdf_display_number(self.invoice, self.settings)}</h1></body></html>"
         return html, css
 
     def _generate_html(self):
@@ -1090,7 +1093,7 @@ class InvoicePDFGenerator:
         <html>
         <head>
             <meta charset="UTF-8">
-            <title>{_('Invoice')} {self.invoice.invoice_number}</title>
+            <title>{_('Invoice')} {pdf_display_number(self.invoice, self.settings)}</title>
             <style>
             :root {{
                 --primary: #2563eb;
@@ -1174,7 +1177,7 @@ class InvoicePDFGenerator:
                     <div class="invoice-meta">
                         <div class="invoice-title">{_('INVOICE')}</div>
                         <div class="meta-grid">
-                            <div class="label">{_('Invoice #')}</div><div class="value">{self.invoice.invoice_number}</div>
+                            <div class="label">{_('Invoice #')}</div><div class="value">{pdf_display_number(self.invoice, self.settings)}</div>
                             <div class="label">{_('Issue Date')}</div><div class="value">{self.invoice.issue_date.strftime('%Y-%m-%d') if self.invoice.issue_date else ''}</div>
                             <div class="label">{_('Due Date')}</div><div class="value">{self.invoice.due_date.strftime('%Y-%m-%d') if self.invoice.due_date else ''}</div>
                             <div class="label">{_('Status')}</div><div class="value">{_(self.invoice.status.title())}</div>

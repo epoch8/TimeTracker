@@ -77,6 +77,7 @@ def portal_list_invoices():
                 {
                     "id": inv.id,
                     "invoice_number": inv.invoice_number,
+                    "display_number": inv.display_number,
                     "status": inv.status,
                     "total_amount": float(inv.total_amount or 0),
                     "currency_code": getattr(inv, "currency_code", None) or "EUR",
@@ -112,6 +113,7 @@ def portal_get_invoice(invoice_id):
             "invoice": {
                 "id": inv.id,
                 "invoice_number": inv.invoice_number,
+                "display_number": inv.display_number,
                 "status": inv.status,
                 "client_name": inv.client_name,
                 "total_amount": float(inv.total_amount or 0),

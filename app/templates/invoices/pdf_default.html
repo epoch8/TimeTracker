@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>{{ _('Invoice') }} {{ invoice.invoice_number }}</title>
+    <title>{{ _('Invoice') }} {{ invoice.display_number }}</title>
 </head>
 <body>
     <div class="wrapper">
@@ -53,7 +53,7 @@
             <div class="invoice-meta">
                 <div class="invoice-title">{{ _('INVOICE') }}</div>
                 <div class="meta-grid">
-                    <div class="label">{{ _('Invoice #') }}</div><div class="value">{{ invoice.invoice_number }}</div>
+                    <div class="label">{{ _('Invoice #') }}</div><div class="value">{{ invoice.display_number }}</div>
                     <div class="label">{{ _('Issue Date') }}</div><div class="value">{{ format_date(invoice.issue_date) }}</div>
                     <div class="label">{{ _('Due Date') }}</div><div class="value">{{ format_date(invoice.due_date) }}</div>
                     <div class="label">{{ _('Status') }}</div><div class="value">{{ _(invoice.status|title) }}</div>

@@ -101,7 +101,7 @@ class ClientNotificationService:
         notification = self.create_notification(
             client_id=client_id,
             notification_type=NotificationType.INVOICE_CREATED.value,
-            title=f"New Invoice: {invoice.invoice_number}",
+            title=f"New Invoice: {invoice.display_number}",
             message=f"A new invoice has been created for {invoice.total_amount} {invoice.currency_code}.",
             link_url=f"/client-portal/invoices/{invoice_id}",
             link_text="View Invoice",
@@ -120,8 +120,8 @@ class ClientNotificationService:
         notification = self.create_notification(
             client_id=client_id,
             notification_type=NotificationType.INVOICE_PAID.value,
-            title=f"Invoice Paid: {invoice.invoice_number}",
-            message=f"Payment of {amount} {invoice.currency_code} has been received for invoice {invoice.invoice_number}.",
+            title=f"Invoice Paid: {invoice.display_number}",
+            message=f"Payment of {amount} {invoice.currency_code} has been received for invoice {invoice.display_number}.",
             link_url=f"/client-portal/invoices/{invoice_id}",
             link_text="View Invoice",
             metadata={"invoice_id": invoice_id, "amount": amount},
@@ -139,8 +139,8 @@ class ClientNotificationService:
         notification = self.create_notification(
             client_id=client_id,
             notification_type=NotificationType.INVOICE_OVERDUE.value,
-            title=f"Overdue Invoice: {invoice.invoice_number}",
-            message=f"Invoice {invoice.invoice_number} is {days_overdue} days overdue. Amount: {invoice.outstanding_amount} {invoice.currency_code}.",
+            title=f"Overdue Invoice: {invoice.display_number}",
+            message=f"Invoice {invoice.display_number} is {days_overdue} days overdue. Amount: {invoice.outstanding_amount} {invoice.currency_code}.",
             link_url=f"/client-portal/invoices/{invoice_id}",
             link_text="View Invoice",
             metadata={"invoice_id": invoice_id, "days_overdue": days_overdue},

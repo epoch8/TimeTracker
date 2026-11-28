@@ -192,8 +192,8 @@ def _get_recipient(invoice) -> Optional[str]:
 def _reminder_subject(invoice, level) -> str:
     days = abs(level.days_offset)
     if level.days_offset >= 0:
-        return f"Payment reminder – invoice {invoice.invoice_number} ({days} day{'s' if days != 1 else ''} overdue)"
-    return f"Upcoming invoice due – {invoice.invoice_number} (due in {days} day{'s' if days != 1 else ''})"
+        return f"Payment reminder – invoice {invoice.display_number} ({days} day{'s' if days != 1 else ''} overdue)"
+    return f"Upcoming invoice due – {invoice.display_number} (due in {days} day{'s' if days != 1 else ''})"
 
 
 def _send_reminder_email(invoice, level) -> bool:

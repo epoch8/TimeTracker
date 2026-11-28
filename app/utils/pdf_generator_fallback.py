@@ -17,6 +17,7 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.models import Settings
+from app.utils.invoice_numbering import pdf_display_number
 from app.utils.pdf_fonts import ensure_pdf_fonts_registered, resolve_font
 from app.utils.pdf_watermark import make_page_callback, should_draw_watermark
 
@@ -183,7 +184,9 @@ class InvoicePDFGeneratorFallback:
 
         invoice_info.append(Paragraph(_("INVOICE"), self.styles["InvoiceTitle"]))
         invoice_info.append(
-            Paragraph(_("Invoice #: %(num)s", num=self.invoice.invoice_number), self.styles["NormalText"])
+            Paragraph(
+                _("Invoice #: %(num)s", num=pdf_display_number(self.invoice, self.settings)), self.styles["NormalText"]
+            )
         )
         try:
             # Use DD.MM.YYYY format for invoices and quotes

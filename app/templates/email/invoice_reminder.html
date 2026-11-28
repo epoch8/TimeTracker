@@ -18,17 +18,17 @@
     <p>Dear {% if invoice.client %}{{ invoice.client.name }}{% else %}{{ invoice.client_name }}{% endif %},</p>
 
     {% if days_offset >= 0 %}
-    <p>This is a friendly reminder that invoice <strong>{{ invoice.invoice_number }}</strong> is
+    <p>This is a friendly reminder that invoice <strong>{{ invoice.display_number }}</strong> is
       {% if days_offset == 0 %}due today{% else %}{{ days_offset }} day{{ 's' if days_offset != 1 }} overdue{% endif %}.
     </p>
     {% else %}
-    <p>This is a reminder that invoice <strong>{{ invoice.invoice_number }}</strong> is due in
+    <p>This is a reminder that invoice <strong>{{ invoice.display_number }}</strong> is due in
       {{ days_offset | abs }} day{{ 's' if (days_offset | abs) != 1 }}.
     </p>
     {% endif %}
 
     <div class="invoice-details">
-      <strong>Invoice:</strong> {{ invoice.invoice_number }}<br>
+      <strong>Invoice:</strong> {{ invoice.display_number }}<br>
       <strong>Amount due:</strong> {{ invoice.currency_code }} {{ "%.2f"|format(invoice.outstanding_amount) }}<br>
       <strong>Due date:</strong> {{ invoice.due_date }}<br>
       {% if invoice.late_fee_amount and invoice.late_fee_amount > 0 %}

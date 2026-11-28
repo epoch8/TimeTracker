@@ -772,7 +772,7 @@ def _build_invoice_email_payload(invoice, email_template_id=None, custom_message
         current_app.logger.error(f"[INVOICE EMAIL] PDF/A-3 normalization failed: {pdfa_err}")
         raise ValueError(f"PDF/A-3 normalization failed: {pdfa_err}. Email not sent.") from None
     company_name = settings.company_name if settings else "Your Company"
-    subject = f"Invoice {invoice.invoice_number} from {company_name}"
+    subject = f"Invoice {invoice.display_number} from {company_name}"
 
     html_body = None
     text_body = None
@@ -816,7 +816,7 @@ def _build_invoice_email_payload(invoice, email_template_id=None, custom_message
                     company_name=company_name,
                     custom_message=custom_message,
                 )
-                text_body = f"Invoice {invoice.invoice_number} - Please see attached PDF for details."
+                text_body = f"Invoice {invoice.display_number} - Please see attached PDF for details."
         except Exception as template_error:
             current_app.logger.warning(f"[INVOICE EMAIL] Custom template failed: {template_error}")
             current_app.logger.exception("[INVOICE EMAIL] Template error details:")
@@ -825,10 +825,10 @@ def _build_invoice_email_payload(invoice, email_template_id=None, custom_message
         text_body = f"""
 Hello,
 
-Please find attached invoice {invoice.invoice_number} for your records.
+Please find attached invoice {invoice.display_number} for your records.
 
 Invoice Details:
-- Invoice Number: {invoice.invoice_number}
+- Invoice Number: {invoice.display_number}
 - Issue Date: {invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else 'N/A'}
 - Due Date: {invoice.due_date.strftime('%Y-%m-%d') if invoice.due_date else 'N/A'}
 - Amount: {invoice.currency_code} {invoice.total_amount}

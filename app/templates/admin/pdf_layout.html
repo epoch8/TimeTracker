@@ -1974,6 +1974,10 @@
             <div id="tab-variables" class="tab-pane">
                 <div class="element-group">
                     <div class="element-group-title">{{ _('Invoice Fields') }}</div>
+                    <div class="variable-item" data-variable="invoice.display_number">
+                        <div class="variable-name">{{ '{{' }} invoice.display_number {{ '}}' }}</div>
+                        <div class="variable-desc">{{ _('Invoice number as the client sees it (the printed number, else the number)') }}</div>
+                    </div>
                     <div class="variable-item" data-variable="invoice.invoice_number">
                         <div class="variable-name">{{ '{{' }} invoice.invoice_number {{ '}}' }}</div>
                         <div class="variable-desc">{{ _('Invoice number') }}</div>
@@ -3071,7 +3075,7 @@ async function initializePDFEditor() {
         'company-tax-id': { text: 'Tax ID: {{ settings.company_tax_id }}', fontSize: 12 },
 
         // Invoice data
-        'invoice-number': { text: 'Invoice #: {{ invoice.invoice_number }}', fontSize: 14, fontStyle: 'bold' },
+        'invoice-number': { text: 'Invoice #: {{ invoice.display_number }}', fontSize: 14, fontStyle: 'bold' },
         'invoice-date': { text: 'Date: {{ format_date(invoice.issue_date) }}', fontSize: 12 },
         'due-date': { text: 'Due Date: {{ format_date(invoice.due_date) }}', fontSize: 12 },
         'invoice-status': { text: 'Status: {{ invoice.status|upper }}', fontSize: 12 },

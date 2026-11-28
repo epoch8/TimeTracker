@@ -38,6 +38,7 @@ ASSET_BASE = "https://tt-assets.invalid/"  # never fetched from the network: see
 
 # Variables a template can use. Shown on the edit page; used for "did you mean" hints.
 TEMPLATE_VARIABLES = [
+    ("invoice.display_number", "Invoice number as the client sees it (the printed number, else the number)"),
     ("invoice.invoice_number", "Invoice number"),
     ("invoice.issue_date", "Issue date (use doc_date)"),
     ("invoice.due_date", "Due date (use doc_date)"),
@@ -285,8 +286,10 @@ def build_context(invoice, settings=None) -> Dict[str, Any]:
         or getattr(settings, "company_bank_info", "")
     )
 
+    from app.utils.invoice_numbering import InvoicePdfView
+
     return {
-        "invoice": invoice,
+        "invoice": InvoicePdfView(invoice, settings),
         "seller": _seller(settings),
         "buyer": _buyer(invoice),
         "payment_details": (payment_details or "").strip(),
@@ -372,7 +375,7 @@ _ALIASES = {
     "iban": "payment_details",
     "bank": "payment_details",
     "bank_details": "payment_details",
-    "number": "invoice_number",
+    "number": "display_number",
     "date": "issue_date",
     "items": "rows",
     "lines": "rows",

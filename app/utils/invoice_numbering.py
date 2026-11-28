@@ -357,3 +357,33 @@ def generate_next_quote_number(quote_model, quote_query=None, settings=None, now
         now=now,
         lock_settings=False,
     )
+
+
+def pdf_display_number(invoice, settings=None):
+    """The number an invoice PDF prints: the printed number, else the invoice number.
+
+    A PDF that carries its e-invoice XML (ZUGFeRD / Factur-X) prints both, "20 (ACME-20)", so the
+    page matches the XML, which has the invoice number.
+    """
+    number = getattr(invoice, "invoice_number", None) or ""
+    printed = getattr(invoice, "printed_number", None) or ""
+    if not printed or printed == number:
+        return number
+    if settings is not None and getattr(settings, "invoices_zugferd_pdf", False):
+        return f"{printed} ({number})"
+    return printed
+
+
+class InvoicePdfView:
+    """The invoice as a PDF template sees it: the invoice, with ``display_number`` as the PDF prints it."""
+
+    def __init__(self, invoice, settings=None):
+        self._invoice = invoice
+        self._settings = settings
+
+    @property
+    def display_number(self):
+        return pdf_display_number(self._invoice, self._settings)
+
+    def __getattr__(self, name):
+        return getattr(self._invoice, name)

@@ -196,7 +196,7 @@ def get_default_template(page_size: str = "A4") -> Dict[str, Any]:
     # Invoice/Quote details (right side, no box - cleaner)
     details_x = page_width_pt - margin_pt - 200
     detail_items = [
-        ("Invoice #:", "{{ invoice.invoice_number }}", header_y + 30),
+        ("Invoice #:", "{{ invoice.display_number }}", header_y + 30),
         ("Date:", "{{ format_date(invoice.issue_date) if invoice.issue_date else 'N/A' }}", header_y + 50),
         ("Due Date:", "{{ format_date(invoice.due_date) if invoice.due_date else 'N/A' }}", header_y + 70),
     ]

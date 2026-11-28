@@ -83,7 +83,7 @@
                         <a href="{{ url_for('client_portal.view_invoice', invoice_id=invoice.id) }}"
                            class="font-semibold text-primary hover:text-primary/80 hover:underline flex items-center space-x-2 group-hover:text-primary transition-colors">
                             <i class="fas fa-file-invoice text-sm"></i>
-                            <span>{{ invoice.invoice_number }}</span>
+                            <span>{{ invoice.display_number }}</span>
                         </a>
                     </td>
                     <td class="py-4 px-6">

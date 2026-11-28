@@ -1,18 +1,18 @@
 {% extends "client_portal/base.html" %}
 {% from "components/ui.html" import page_header %}
 
-{% block title %}{{ invoice.invoice_number }} - {{ _('Client Portal') }}{% endblock %}
+{% block title %}{{ invoice.display_number }} - {{ _('Client Portal') }}{% endblock %}
 
 {% block content %}
 {% set breadcrumbs = [
     {'text': _('Client Portal'), 'url': url_for('client_portal.dashboard')},
     {'text': _('Invoices'), 'url': url_for('client_portal.invoices')},
-    {'text': invoice.invoice_number}
+    {'text': invoice.display_number}
 ] %}
 
 {{ page_header(
     icon_class='fas fa-file-invoice',
-    title_text=invoice.invoice_number,
+    title_text=invoice.display_number,
     subtitle_text=_('Invoice Details'),
     breadcrumbs=breadcrumbs
 ) }}

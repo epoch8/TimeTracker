@@ -193,10 +193,10 @@ class PaymentService:
 
         send_template_email(
             to=invoice.client_email,
-            subject=f"Payment Receipt — Invoice {invoice.invoice_number}",
+            subject=f"Payment Receipt — Invoice {invoice.display_number}",
             template="email/payment_receipt.html",
             client_name=invoice.client_name or "",
-            invoice_number=invoice.invoice_number or str(invoice.id),
+            invoice_number=invoice.display_number or str(invoice.id),
             amount=payment.amount,
             currency=payment.currency or invoice.currency_code or "EUR",
             payment_date=str(payment.payment_date),

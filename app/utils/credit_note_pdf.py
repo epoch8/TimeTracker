@@ -29,7 +29,7 @@ def generate_credit_note_pdf(cn) -> bytes:
         story.append(Paragraph(f"<b>Issue date:</b> {cn.issue_date.isoformat()}", normal))
     story.append(Paragraph(f"<b>Status:</b> {cn.status}", normal))
     if cn.invoice:
-        story.append(Paragraph(f"<b>Original invoice:</b> {cn.invoice.invoice_number}", normal))
+        story.append(Paragraph(f"<b>Original invoice:</b> {cn.invoice.display_number}", normal))
         story.append(Paragraph(f"<b>Client:</b> {cn.invoice.client_name or ''}", normal))
     if cn.reason:
         story.append(Spacer(1, 6))

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Invoice {{ invoice.invoice_number }}</title>
+<title>Invoice {{ invoice.display_number }}</title>
 {#
   Built-in invoice template "simple".
 
@@ -81,7 +81,7 @@
   <div class="doc">
     <h1>Invoice</h1>
     <table>
-      <tr><td>Number</td><td>{{ invoice.invoice_number }}</td></tr>
+      <tr><td>Number</td><td>{{ invoice.display_number }}</td></tr>
       <tr><td>Issue date</td><td>{{ doc_date(invoice.issue_date) }}</td></tr>
       <tr><td>Due date</td><td>{{ doc_date(invoice.due_date) }}</td></tr>
     </table>

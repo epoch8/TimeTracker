@@ -60,19 +60,19 @@
 </head>
 <body>
     <div class="header">
-        <h1>{{ _('Invoice') }} {{ invoice.invoice_number }}</h1>
+        <h1>{{ _('Invoice') }} {{ invoice.display_number }}</h1>
     </div>
 
     <div class="content">
         <p>Hello,</p>
 
-        <p>Please find attached invoice <strong>{{ invoice.invoice_number }}</strong> for your records.</p>
+        <p>Please find attached invoice <strong>{{ invoice.display_number }}</strong> for your records.</p>
 
         <div class="invoice-details">
             <table>
                 <tr>
                     <td>Invoice Number:</td>
-                    <td>{{ invoice.invoice_number }}</td>
+                    <td>{{ invoice.display_number }}</td>
                 </tr>
                 <tr>
                     <td>Issue Date:</td>

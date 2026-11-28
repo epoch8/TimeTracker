@@ -45,6 +45,9 @@
             <div class="flex items-center justify-between mb-4">
                 <label class="form-label">{{ _('HTML Template') }} *</label>
                 <div class="flex gap-2" id="variableButtons">
+                    <button type="button" data-variable="invoice.display_number" class="variable-btn px-3 py-1 text-xs bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800">
+                        {{ _('Number as printed') }}
+                    </button>
                     <button type="button" data-variable="invoice.invoice_number" class="variable-btn px-3 py-1 text-xs bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded hover:bg-blue-200 dark:hover:bg-blue-800">
                         {{ _('Invoice Number') }}
                     </button>
@@ -136,6 +139,9 @@
             <div>
                 <h4 class="font-semibold text-sm mb-2 text-gray-700 dark:text-gray-300">{{ _('Invoice Variables') }}</h4>
                 <div class="space-y-1">
+                    <button data-variable="invoice.display_number" class="modal-variable-btn w-full text-left px-3 py-2 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded">
+                        <code>{{ '{{ invoice.display_number }}' }}</code>
+                    </button>
                     <button data-variable="invoice.invoice_number" class="modal-variable-btn w-full text-left px-3 py-2 text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded">
                         <code>{{ '{{ invoice.invoice_number }}' }}</code>
                     </button>
