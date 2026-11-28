@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from app import db
-from app.utils.invoice_numbering import allocate_next_invoice_number
+from app.utils.invoice_numbering import allocate_next_invoice_number, default_issue_date
 
 
 class Invoice(db.Model):
@@ -28,7 +28,7 @@ class Invoice(db.Model):
     quote_id = db.Column(db.Integer, db.ForeignKey("quotes.id"), nullable=True, index=True)
 
     # Invoice details
-    issue_date = db.Column(db.Date, nullable=False, default=datetime.utcnow().date)
+    issue_date = db.Column(db.Date, nullable=False, default=default_issue_date)
     due_date = db.Column(db.Date, nullable=False)
     status = db.Column(
         db.String(20), default="draft", nullable=False
@@ -141,7 +141,7 @@ class Invoice(db.Model):
         self.client_email = kwargs.get("client_email")
         self.client_address = kwargs.get("client_address")
         self.buyer_reference = kwargs.get("buyer_reference")
-        self.issue_date = kwargs.get("issue_date", datetime.utcnow().date())
+        self.issue_date = kwargs.get("issue_date") or default_issue_date()
         self.notes = kwargs.get("notes")
         self.terms = kwargs.get("terms")
         self.tax_rate = Decimal(str(kwargs.get("tax_rate", 0)))

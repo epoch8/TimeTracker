@@ -6,6 +6,11 @@ DEFAULT_QUOTE_PATTERN = "{PREFIX}-{YYYY}{MM}{DD}-{SEQ}"
 _ALLOWED_TOKENS = {"SEQ", "YYYY", "YY", "MM", "DD", "PREFIX"}
 
 
+def default_issue_date():
+    """Issue date of a new invoice when none is given: today (UTC), the same for the model and the column."""
+    return datetime.utcnow().date()
+
+
 def sanitize_invoice_prefix(prefix_value):
     """Normalize legacy prefix input while allowing empty values."""
     if prefix_value is None:
