@@ -837,6 +837,52 @@ def series_preview(series, issue_date=None, period=None, exclude_invoice_id=None
     }
 
 
+def will_be_number(invoice, cache):
+    """For lists: the number a DRAFT-… draft will get, or "". Cheap per row.
+
+    ``cache`` (a dict kept for one request) holds the settings, the active series and the next free
+    {SEQ} per (series, year), so a page of drafts costs a few queries, not a few per row. The number is
+    a preview: the hook decides when the draft is issued.
+    """
+    from app.models import BillingEntityNumberSeries as Series
+
+    if invoice is None or invoice.status != "draft" or not is_draft_placeholder(invoice.invoice_number):
+        return ""
+    if not invoice.billing_entity_id:
+        return ""
+    if "on" not in cache:
+        settings = _numbering_settings()
+        cache["on"] = numbering_on(settings)
+        cache["bill_to_on"] = _module_on_by_settings(CLIENT_ENTITIES_MODULE_ID, settings)
+        cache["next"] = {}
+        if cache["on"]:
+            with db.session.no_autoflush:
+                active = Series.query.filter(Series.status == "active").all()
+            cache["series"] = {(s.billing_entity_id, s.client_id, s.client_entity_id): s for s in active}
+    if not cache["on"]:
+        return ""
+    found = cache["series"]
+    bill_to = invoice.client_entity_id if cache["bill_to_on"] else None
+    series = (
+        (found.get((invoice.billing_entity_id, invoice.client_id, bill_to)) if bill_to else None)
+        or (found.get((invoice.billing_entity_id, invoice.client_id, None)) if invoice.client_id else None)
+        or found.get((invoice.billing_entity_id, None, None))
+    )
+    if series is None:
+        return ""
+    issue_date = invoice.issue_date or default_issue_date()
+    period = invoice.period_end
+    if "{SEQ}" not in (series.number_format or ""):
+        return format_series_number(series, None, issue_date, period)
+    key = (series.id, series.counter_year(issue_date))
+    if key not in cache["next"]:
+        seq = last_seq(series, key[1]) + 1
+        while number_owner(format_series_number(series, seq, issue_date, period)) is not None:
+            seq += 1
+        cache["next"][key] = seq
+    return format_series_number(series, cache["next"][key], issue_date, period)
+
+
 def last_series_invoice(series):
     from app.models import Invoice
 

@@ -607,3 +607,34 @@ def test_a_failed_flush_leaves_no_number_behind(app, project, test_client, user,
     first = db.session.get(Invoice, first.id)
     assert _issue(first)["success"]
     assert first.invoice_number == "CLIENTA-20"
+
+
+# --- notices, list previews, Next {SEQ} and texts ---------------------------------------------------
+
+
+def test_list_preview_costs_the_same_for_ten_drafts(app, project, test_client, user, entity):
+    from sqlalchemy import event
+
+    _series(entity, "CLIENTA-{SEQ}", client=test_client, next_seq=20)
+    ids = [_draft(project, test_client, user, entity).id for _ in range(10)]
+    drafts = Invoice.query.filter(Invoice.id.in_(ids)).order_by(Invoice.id).all()  # as a list page loads them
+
+    def count(invoices):
+        statements = []
+
+        def seen(*args):
+            statements.append(1)
+
+        engine = db.engine
+        event.listen(engine, "before_cursor_execute", seen)
+        try:
+            cache = {}
+            numbers = [billing.will_be_number(inv, cache) for inv in invoices]
+        finally:
+            event.remove(engine, "before_cursor_execute", seen)
+        return numbers, len(statements)
+
+    one, queries_one = count(drafts[:1])
+    ten, queries_ten = count(drafts)
+    assert one == ["CLIENTA-20"] and set(ten) == {"CLIENTA-20"}
+    assert queries_ten == queries_one

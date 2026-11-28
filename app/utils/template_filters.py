@@ -57,24 +57,21 @@ def _normalize_toastui_markdown(text):
 
 
 def register_template_filters(app):
+    """Register custom template filters for the application"""
+
     @app.template_global("invoice_will_be")
     def invoice_will_be(invoice):
         """The number a DRAFT-… draft will get from its series when issued, or "" (lists: "Draft · will be ACME-21")."""
-        try:
-            from app.utils.billing_entities import is_draft_placeholder, series_for_invoice, series_preview
+        from flask import has_request_context, request
 
-            if invoice is None or invoice.status != "draft" or not is_draft_placeholder(invoice.invoice_number):
-                return ""
-            series = series_for_invoice(invoice)
-            if series is None:
-                return ""
-            return series_preview(series, invoice.issue_date, invoice.period_end, exclude_invoice_id=invoice.id)[
-                "number"
-            ]
+        try:
+            from app.utils.billing_entities import will_be_number
+
+            # One cache per request: settings, series and next numbers are read once for the whole list
+            cache = request.environ.setdefault("timetracker.invoice_will_be", {}) if has_request_context() else {}
+            return will_be_number(invoice, cache)
         except Exception:
             return ""
-
-    """Register custom template filters for the application"""
 
     @app.template_filter("local_datetime")
     def local_datetime_filter(utc_dt, format_str=None):
