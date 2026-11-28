@@ -26,8 +26,6 @@
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1 hidden" id="seriesPrevious"></p>
             {% if series_invoice and sd and sd.placeholder %}
             <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('The draft itself is %(number)s until it is issued.', number=series_invoice.invoice_number) }}</p>
-            {% elif series_mode == 'create' %}
-            <p class="text-xs text-text-muted-light dark:text-text-muted-dark mt-1">{{ _('Until it is issued the draft is DRAFT-<id>, so a deleted draft leaves no gap.') }}</p>
             {% endif %}
         </div>
         <div class="min-w-0">

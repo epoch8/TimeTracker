@@ -300,6 +300,8 @@ def form_context(projects, settings, issue_date=None, period=None):
         data[e.id] = {
             "name": e.short_name,
             **number_preview(e, issue_date, period=period),
+            # Numbered by its series: the Number row shows "Will be …" even without an entity number format
+            "series": entity_has_series(e.id),
             "previous": invoice_ref(previous) if previous else None,
             "defaults": entity_defaults(e),
             "accounts": [

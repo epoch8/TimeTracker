@@ -334,6 +334,18 @@ def test_step_one_makes_a_placeholder_draft(app, authenticated_client, project, 
     assert billing.last_seq(series, 0) == 19
 
 
+def test_step_one_shows_the_number_row_for_an_entity_without_a_number_format(
+    app, authenticated_client, project, test_client, series
+):
+    entity = series.billing_entity
+    assert not entity.number_format  # a new entity: its numbers come from its series only
+    data = billing.form_context([project], Settings.get_settings())["billing_entity_data"]
+    assert data[entity.id]["series"] is True and data[entity.id]["number"] == ""
+    page = authenticated_client.get(f"/invoices/new?client_id={test_client.id}").get_data(as_text=True)
+    # the row with "Will be …" stays visible for a From with series
+    assert "e && (e.number || e.series)" in page and "seriesNumberBox" in page
+
+
 def test_step_one_set_number_now_and_printed_as(app, authenticated_client, project, test_client, series):
     data = _step_one(
         project,

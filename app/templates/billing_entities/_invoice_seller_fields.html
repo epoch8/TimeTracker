@@ -239,7 +239,8 @@ document.addEventListener('DOMContentLoaded', function () {
     function onEntityChange(keepAccount) {
         var e = currentEntity();
         if (document.getElementById('invoiceNumberRow')) {
-            document.getElementById('invoiceNumberRow').style.display = e && e.number ? '' : 'none';
+            // A From with series always has a Number row (its "Will be …"); else only with a number format
+            document.getElementById('invoiceNumberRow').style.display = e && (e.number || e.series) ? '' : 'none';
         }
         renderSeller(e);
         fillAccounts(keepAccount);
